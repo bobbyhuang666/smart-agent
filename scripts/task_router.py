@@ -258,11 +258,15 @@ def estimate_complexity(task: Task) -> dict:
         signal_parts.append(f"本地模式: {local_match}个模式(bonus={local_pattern_bonus})")
     signal_detail = "; ".join(signal_parts) if signal_parts else "无显著信号"
 
-    # 阈值判定（与之前一致，<=3 走本地）
-    route = "local" if score <= 3 else "cloud"
+    # 阈值判定（使用渐进式自适应阈值）
+    task_type = detect_task_type(action_lower)
+    capability = TASK_TO_CAPABILITY.get(task_type, "")
+    effective_threshold = cap_tracker.get_adjusted_threshold(capability)
+
+    route = "local" if score <= effective_threshold else "cloud"
     return {
         "route": route,
-        "reason": f"复杂度评分={score:.2f} (<=3 走本地); {signal_detail}",
+        "reason": f"复杂度评分={score:.2f} (<={effective_threshold:.1f} 走本地); {signal_detail}",
         "score": score,
     }
 
@@ -673,6 +677,216 @@ def decompose_complex_task(action: str, text: str) -> list[dict]:
         })
 
     return subtasks if subtasks else []
+
+
+# ─── RLM 风格递归拆解 ──────────────────────────────────────────
+# 参考 RLM (Recursive Language Models) 的 EXECUTE/RECURSE 模式：
+#   当任务复杂度在"边界区间"时，不直接走云端，而是尝试拆解。
+#   拆解后的子任务各自独立路由，部分可能适合本地。
+#   递归终止条件：子任务已足够简单（EXECUTE）或无法再拆（RECURSE→cloud）。
+
+RECURSE_CONNECTORS = [
+    "并且", "然后", "接着", "再", "再然后", "之后",
+    "同时", "以及", "并",
+    "先", "首先", "其次", "最后",
+    "1.", "2.", "3.",
+]
+
+# 边界区间：评分在此范围内尝试递归拆解
+RECURSE_SCORE_MIN = 2.5
+RECURSE_SCORE_MAX = 7.0
+
+
+def _recursive_decompose(action: str, text: str, depth: int = 0) -> list[dict] | None:
+    """
+    递归拆解任务。返回子任务列表或 None（无法拆解）。
+    每个子任务格式：{"action": str, "text": str, "route": str, "score": float}
+    depth 防止无限递归（最大 3 层）。
+    """
+    if depth >= 3:
+        return None
+
+    action_lower = action.lower()
+
+    # 1. 先检测已有 compound pattern（decompose_complex_task 已有的能力）
+    known_subtasks = decompose_complex_task(action, text)
+    if known_subtasks:
+        # 注入路由信息
+        for st in known_subtasks:
+            if "route" not in st:
+                t = Task(action=st.get("action", ""), text=text)
+                dec = estimate_complexity(t)
+                st["route"] = dec["route"]
+                st["score"] = dec["score"]
+                st["reason"] = dec["reason"]
+        return known_subtasks
+
+    # 2. 按连接词分割 action
+    #   例如 "分析销售数据并生成报告" → ["分析销售数据", "生成报告"]
+    parts = []
+    remaining = action
+    for conn in RECURSE_CONNECTORS:
+        if conn in remaining:
+            segments = remaining.split(conn, 1)
+            if len(segments) == 2:
+                # 前后都有内容才分割
+                if segments[0].strip() and segments[1].strip():
+                    parts = [segments[0].strip(), segments[1].strip()]
+                    break
+
+    if len(parts) < 2:
+        # 尝试按逗号/顿号分割（仅当分割后每段都有动词）
+        for sep in ["，", "、", ","]:
+            if sep in remaining:
+                segments = [s.strip() for s in remaining.split(sep) if s.strip()]
+                # 需要每段 2+ 个字符（至少一个动词 + 宾语）
+                valid_segments = [s for s in segments if len(s) >= 3]
+                if len(valid_segments) >= 2:
+                    parts = valid_segments
+                    break
+
+    if len(parts) < 2:
+        return None
+
+    # 3. 对每部分独立评估复杂度
+    subtasks = []
+    for part in parts:
+        t = Task(action=part, text=text)
+        dec = estimate_complexity(t)
+
+        # 如果子任务仍然在边界区间，递归拆解
+        if RECURSE_SCORE_MIN <= dec["score"] <= RECURSE_SCORE_MAX:
+            deeper = _recursive_decompose(part, text, depth + 1)
+            if deeper:
+                subtasks.extend(deeper)
+                continue
+
+        subtasks.append({
+            "type": "",
+            "action": part,
+            "text": text,
+            "route": dec["route"],
+            "score": dec["score"],
+            "reason": dec["reason"],
+        })
+
+    return subtasks if len(subtasks) >= 2 else None
+
+
+# ─── 渐进式置信度阈值（按能力自适应调整） ─────────────────────
+# 参考 FrugalRoute: confidence threshold adapts per capability
+# 基于历史执行数据动态调整各能力类型的路由阈值
+
+CAPABILITY_THRESHOLD_FILE = "capability_thresholds.jsonl"
+
+# 默认阈值（被 estimate_complexity 的 score <= 3 使用）
+DEFAULT_CAPABILITY_THRESHOLD = 3.0
+
+# 阈值调整参数
+THRESHOLD_LOOKBACK = 20           # 取最近多少条记录
+THRESHOLD_ADJUST_UP = 0.3         # 成功率低时上调（更保守）
+THRESHOLD_ADJUST_DOWN = 0.2       # 成功率高时下调（更积极）
+THRESHOLD_SUCCESS_MIN = 0.80      # 最低接受成功率
+THRESHOLD_TARGET = 0.90           # 目标成功率
+
+
+class CapabilityTracker:
+    """
+    按能力类型追踪本地执行成功率。
+    数据持久化到 JSONL 文件。
+    """
+
+    def __init__(self):
+        self.cache_dir = CONFIG["cache_dir"]
+        self.data_file = os.path.join(self.cache_dir, CAPABILITY_THRESHOLD_FILE)
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self._threshold_cache = {}
+
+    def _load_recent(self, capability: str, n: int = THRESHOLD_LOOKBACK) -> list[dict]:
+        """加载某个能力最近 N 条记录"""
+        records = []
+        if not os.path.exists(self.data_file):
+            return records
+        with open(self.data_file) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                    if rec.get("capability") == capability:
+                        records.append(rec)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        return records[-n:]
+
+    def record(self, capability: str, success: bool, score: float = 0, task_type: str = ""):
+        """记录一次执行结果"""
+        entry = {
+            "capability": capability,
+            "success": success,
+            "score": round(score, 2),
+            "task_type": task_type,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with open(self.data_file, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # 清除缓存
+        self._threshold_cache.pop(capability, None)
+
+    def get_success_rate(self, capability: str) -> float:
+        """获取某个能力的最近成功率"""
+        records = self._load_recent(capability)
+        if not records:
+            return 1.0  # 无数据时乐观
+        successes = sum(1 for r in records if r.get("success", False))
+        return successes / len(records)
+
+    def get_adjusted_threshold(self, capability: str) -> float:
+        """获取调整后的阈值（默认 3.0，根据历史上调或下调）"""
+        if not capability:
+            return DEFAULT_CAPABILITY_THRESHOLD
+        if capability in self._threshold_cache:
+            return self._threshold_cache[capability]
+
+        rate = self.get_success_rate(capability)
+        threshold = DEFAULT_CAPABILITY_THRESHOLD
+
+        if rate < THRESHOLD_SUCCESS_MIN:
+            # 成功率低 → 上调阈值（更保守，更多走云端）
+            steps = int((THRESHOLD_TARGET - rate) / 0.1)
+            threshold += steps * THRESHOLD_ADJUST_UP
+        elif rate > THRESHOLD_TARGET:
+            # 成功率高 → 下调阈值（更积极，更多走本地）
+            steps = int((rate - THRESHOLD_TARGET) / 0.05)
+            threshold = max(1.0, threshold - steps * THRESHOLD_ADJUST_DOWN)
+
+        threshold = round(max(1.0, min(8.0, threshold)), 1)
+        self._threshold_cache[capability] = threshold
+        return threshold
+
+    def get_all_adjustments(self) -> dict:
+        """返回所有能力的调整信息（用于展示）"""
+        all_caps = set()
+        if os.path.exists(self.data_file):
+            with open(self.data_file) as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        all_caps.add(rec.get("capability", ""))
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
+        result = {}
+        for cap in sorted(all_caps):
+            if cap:
+                rate = self.get_success_rate(cap)
+                threshold = self.get_adjusted_threshold(cap)
+                diff = round(threshold - DEFAULT_CAPABILITY_THRESHOLD, 1)
+                result[cap] = {
+                    "success_rate": round(rate, 2),
+                    "threshold": threshold,
+                    "adjustment": f"{'+' if diff > 0 else ''}{diff}",
+                    "direction": "上调" if diff > 0 else "下调" if diff < 0 else "不变",
+                }
+        return result
 
 
 # ─── 构建优化后的 Prompt ──────────────────────────────────────────
@@ -1605,6 +1819,7 @@ class Judge:
 store = DistillationStore()
 judge = Judge()
 cache = SemanticCache()
+cap_tracker = CapabilityTracker()
 
 
 def collect_pair(task: Task, response_text: str = None,
@@ -1896,6 +2111,9 @@ def run_task(task: Task, force_route: str = "") -> Task:
 
         # 1. 尝试拆解复合任务
         subtasks = decompose_complex_task(clean_action, clean_text)
+        if not subtasks:
+            # 没有已知模式 → 尝试通用递归拆解
+            subtasks = _recursive_decompose(clean_action, clean_text)
         if subtasks:
             outputs = []
             for st in subtasks:
@@ -1938,6 +2156,12 @@ def run_task(task: Task, force_route: str = "") -> Task:
 
         # ── 输出验证 + 云端降级 ──
         validation = validate_local_output(task.output, task_type)
+        # 记录能力执行结果（用于自适应阈值）
+        cap = TASK_TO_CAPABILITY.get(task_type, "")
+        if cap:
+            cap_tracker.record(cap, success=validation["valid"],
+                               score=1.0 if validation["valid"] else 0.3,
+                               task_type=task_type)
         if not validation["valid"] and CONFIG["cloud_api_key"]:
             # 本地输出质量差，自动回退到云端
             cloud_result = call_cloud_api(task.action, task.text)
@@ -1956,7 +2180,35 @@ def run_task(task: Task, force_route: str = "") -> Task:
             # 没有云端配置，在输出中标记警告
             task.output += f"\n\n[警告: 本地输出质量可能不佳 - {validation['reason']}]"
     else:
-        # ── 云端任务：直接调用 ──
+        # ── 云端任务：先检查是否能递归拆解 ──
+        decision = estimate_complexity(task) if not force_route else {"score": 9, "route": force_route}
+        if RECURSE_SCORE_MIN <= decision["score"] <= RECURSE_SCORE_MAX:
+            subtasks = _recursive_decompose(task.action, task.text)
+            if subtasks:
+                # 有子任务 → 混合执行
+                outputs = []
+                for st in subtasks:
+                    st_action = st.get("action", st.get("type", ""))
+                    st_text = st.get("text", task.text)
+                    st_task = Task(action=st_action, text=st_text)
+                    st_route = st.get("route", "")
+                    st_result = run_task(st_task, force_route=st_route if st_route else "")
+                    outputs.append(f"[{st_action[:30]}]({st_result.route})\n{st_result.output}")
+                    task.tokens_input += st_result.tokens_input
+                    task.tokens_output += st_result.tokens_output
+                    task.time_ms += st_result.time_ms
+                    task.cost_saved += st_result.cost_saved
+                task.output = "\n\n---\n\n".join(outputs)
+                task.route = "hybrid(recurse)"
+                task.model_used = "mixed"
+                if task.output and len(task.output.strip()) > 3:
+                    cache.set(task.action, task.text,
+                              {"text": task.output, "tokens_input": task.tokens_input,
+                               "tokens_output": task.tokens_output})
+                log_usage(task)
+                return task
+
+        # 无法拆解 → 直接调用云端
         result = call_cloud_api(task.action, task.text)
         task.output = result["text"]
         # 蒸馏：自动采集云端响应
@@ -2512,6 +2764,7 @@ def main():
     parser.add_argument("--distill", action="store_true", help="运行蒸馏：评判未处理的训练对")
     parser.add_argument("--distill-stats", action="store_true", help="查看蒸馏系统健康状态")
     parser.add_argument("--distill-export", nargs="?", const="auto", help="导出可训练数据为 JSONL")
+    parser.add_argument("--thresholds", action="store_true", help="查看自适应阈值调整情况")
     args = parser.parse_args()
 
     if args.stats:
@@ -2688,6 +2941,20 @@ def main():
         path = args.distill_export if args.distill_export != "auto" else None
         result = export_distillation(path)
         print(result)
+        return
+
+    if args.thresholds:
+        adjs = cap_tracker.get_all_adjustments()
+        if not adjs:
+            print("暂无自适应阈值数据（执行一些本地任务后会自动生成）")
+            return
+        lines = ["自适应阈值调整情况", "="*50]
+        for cap, info in adjs.items():
+            lines.append(
+                f"  {cap:20s} | 成功率: {info['success_rate']:.0%} | "
+                f"阈值: {info['threshold']:.1f} ({info['direction']} {info['adjustment']})"
+            )
+        print("\n".join(lines))
         return
 
     if not args.task:
