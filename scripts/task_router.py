@@ -2460,6 +2460,29 @@ def run_task(task: Task, force_route: str = "") -> Task:
             route=original_route,
         )
     log_usage(task)
+
+    # 审计日志
+    try:
+        from audit import get_audit_logger, AuditEvent
+        audit = get_audit_logger()
+        audit.log(AuditEvent(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            event_type="task_execution",
+            action=task.action[:100],
+            details={
+                "route": task.route,
+                "model": task.model_used,
+                "tokens_input": task.tokens_input,
+                "tokens_output": task.tokens_output,
+                "cost_saved": task.cost_saved,
+                "output_length": len(task.output or ""),
+            },
+            status="success" if task.route != "error" else "failure",
+            duration_ms=task.time_ms,
+        ))
+    except Exception:
+        pass
+
     return task
 
 

@@ -30,6 +30,7 @@ from task_router import (
     decompose_complex_task, CONFIG, cache,
     get_model_registry, run_batch,
 )
+from audit import get_audit_logger, get_quota_manager
 
 
 # ─── API 处理器 ──────────────────────────────────────────────────
@@ -49,6 +50,8 @@ class TaskRouterAPI(BaseHTTPRequestHandler):
             "/api/cache": self._api_cache_stats,
             "/api/health": self._api_health,
             "/api/history": self._api_history,
+            "/api/audit": self._api_audit,
+            "/api/audit/summary": self._api_audit_summary,
         }
 
         handler = routes.get(path)
@@ -216,6 +219,21 @@ class TaskRouterAPI(BaseHTTPRequestHandler):
         registry.discover()
         results = registry.run_benchmark(model)
         self._json_response({"results": results})
+
+    def _api_audit(self, params=None):
+        """查询审计日志"""
+        audit = get_audit_logger()
+        limit = int(params.get("limit", ["50"])[0]) if params else 50
+        event_type = params.get("type", [None])[0] if params else None
+        events = audit.query(event_type=event_type, limit=limit)
+        self._json_response({"events": events, "count": len(events)})
+
+    def _api_audit_summary(self, params=None):
+        """审计摘要"""
+        audit = get_audit_logger()
+        days = int(params.get("days", ["7"])[0]) if params else 7
+        summary = audit.get_summary(days=days)
+        self._json_response(summary)
 
     # ─── 仪表盘 ──────────────────────────────────────────────
 
