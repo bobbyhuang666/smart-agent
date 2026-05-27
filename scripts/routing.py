@@ -230,12 +230,20 @@ def decompose_complex_task(action: str, text: str) -> list[dict]:
     return subtasks
 
 
+def _make_subtask(action: str, text: str, depth: int) -> dict:
+    """构建子任务（含类型推断）"""
+    from prompts import PROMPT_TEMPLATES
+    task_type = detect_task_type(action, PROMPT_TEMPLATES)
+    return {"action": action, "text": text, "depth": depth, "type": task_type}
+
+
 def _recursive_decompose(action: str, text: str, depth: int = 0, max_depth: int = 3) -> Optional[list[dict]]:
     """递归拆解复合任务（真正递归：3+ 步任务完整拆解）"""
     if depth >= max_depth:
         return None
 
-    connectors = ["再然后", "然后", "接着", "同时", "并且", "且", "并", "再"]
+    # 长连接词优先（避免 "再" 单字误切 "再次确认" 等词）
+    connectors = ["再然后", "然后", "接着", "同时", "并且", "且", "并"]
     for conn in connectors:
         if conn in action:
             parts = action.split(conn, 1)
@@ -249,14 +257,14 @@ def _recursive_decompose(action: str, text: str, depth: int = 0, max_depth: int 
                 if left_sub:
                     result.extend(left_sub)
                 else:
-                    result.append({"action": left, "text": text, "depth": depth})
+                    result.append(_make_subtask(left, text, depth))
 
                 # 递归拆解右侧子任务
                 right_sub = _recursive_decompose(right, text, depth + 1, max_depth)
                 if right_sub:
                     result.extend(right_sub)
                 else:
-                    result.append({"action": right, "text": text, "depth": depth})
+                    result.append(_make_subtask(right, text, depth))
 
                 return result
 
@@ -273,7 +281,7 @@ def _recursive_decompose(action: str, text: str, depth: int = 0, max_depth: int 
                 if sub:
                     result.extend(sub)
                 else:
-                    result.append({"action": p, "text": text, "depth": depth})
+                    result.append(_make_subtask(p, text, depth))
             return result if result else None
 
     return None

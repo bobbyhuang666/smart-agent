@@ -26,7 +26,15 @@ class SemanticCache:
         self._load()
 
     def _load(self) -> None:
-        self._entries = read_jsonl(self.cache_file)
+        raw = read_jsonl(self.cache_file)
+        # 去重：同一 key 只保留最后一条（解决重启后旧条目残留）
+        seen: dict[str, int] = {}
+        for i, e in enumerate(raw):
+            k = e.get("key", "")
+            if k:
+                seen[k] = i
+        keep = set(seen.values())
+        self._entries = [e for i, e in enumerate(raw) if i in keep]
 
     def _save(self) -> None:
         write_jsonl(self.cache_file, self._entries)

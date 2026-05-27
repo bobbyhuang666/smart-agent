@@ -67,6 +67,7 @@ class WeightTracker:
     def __init__(self, cache_dir: str):
         self.data_file = os.path.join(cache_dir, "weight_history.jsonl")
         self.weights_file = os.path.join(cache_dir, "a3m_weights.json")
+        self._lock = threading.Lock()
         os.makedirs(cache_dir, exist_ok=True)
         self.weights = self._load_weights()
 
@@ -110,28 +111,29 @@ class WeightTracker:
     def _update_weights(
         self, task_type: str, route: str, score: float, success: bool
     ) -> None:
-        """增量学习：根据路由结果微调权重（考虑任务复杂度）"""
-        lr = self.weights.learning_rate
-        is_local = route.startswith("local")
+        """增量学习：根据路由结果微调权重（考虑任务复杂度，线程安全）"""
+        with self._lock:
+            lr = self.weights.learning_rate
+            is_local = route.startswith("local")
 
-        if is_local:
-            # 本地任务：根据路由评分调整幅度
-            # 低分任务（明确该走本地）成功 → 大幅鼓励
-            # 高分任务（边缘任务）成功 → 小幅鼓励
-            confidence = max(0.3, 1.0 - score / 10.0)
-            if success:
-                self.weights.base_threshold += lr * 0.5 * confidence
-            else:
-                self.weights.base_threshold -= lr * 1.0
-        elif route.startswith("cloud"):
-            if success:
-                # 云端成功 → 阈值微降（确认复杂任务确实该走云端）
-                self.weights.base_threshold -= lr * 0.1
+            if is_local:
+                # 本地任务：根据路由评分调整幅度
+                # 低分任务（明确该走本地）成功 → 大幅鼓励
+                # 高分任务（边缘任务）成功 → 小幅鼓励
+                confidence = max(0.3, 1.0 - score / 10.0)
+                if success:
+                    self.weights.base_threshold += lr * 0.5 * confidence
+                else:
+                    self.weights.base_threshold -= lr * 1.0
+            elif route.startswith("cloud"):
+                if success:
+                    # 云端成功 → 阈值微降（确认复杂任务确实该走云端）
+                    self.weights.base_threshold -= lr * 0.1
 
-        # 限制阈值范围
-        self.weights.base_threshold = max(1.0, min(8.0, self.weights.base_threshold))
+            # 限制阈值范围
+            self.weights.base_threshold = max(1.0, min(8.0, self.weights.base_threshold))
 
-        self._save_weights()
+            self._save_weights()
 
     def get_weights(self) -> A3MWeights:
         """获取当前权重"""

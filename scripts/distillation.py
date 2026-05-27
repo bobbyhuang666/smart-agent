@@ -84,7 +84,8 @@ class DistillationStore:
         return read_jsonl(self.pairs_file)
 
     def add_pair(self, pair: DistillationPair) -> None:
-        append_jsonl(self.pairs_file, asdict(pair))
+        with self._lock:
+            append_jsonl(self.pairs_file, asdict(pair))
 
     def _is_expired(self, pair: dict) -> bool:
         """检查蒸馏对是否过期"""
@@ -106,14 +107,15 @@ class DistillationStore:
 
     def cleanup_expired(self) -> int:
         """清除过期条目，返回删除数量"""
-        pairs = self._load_all()
-        before = len(pairs)
-        alive = [p for p in pairs if not self._is_expired(p)]
-        if len(alive) < before:
-            if len(alive) > self.MAX_PAIRS:
-                alive = alive[-self.MAX_PAIRS:]
-            write_jsonl(self.pairs_file, alive)
-        return before - len(alive)
+        with self._lock:
+            pairs = self._load_all()
+            before = len(pairs)
+            alive = [p for p in pairs if not self._is_expired(p)]
+            if len(alive) < before:
+                if len(alive) > self.MAX_PAIRS:
+                    alive = alive[-self.MAX_PAIRS:]
+                write_jsonl(self.pairs_file, alive)
+            return before - len(alive)
 
     def get_pairs(self, state: Optional[str] = None, capability: Optional[str] = None,
                   task_type: Optional[str] = None, min_score: float = 0.0,
