@@ -6,7 +6,7 @@ A3M 路由准确率基准测试 — 50+ 标注用例
 """
 
 import pytest
-from routing import Task, estimate_complexity, detect_task_type
+from routing import Task, estimate_complexity, detect_task_type, decompose_complex_task
 from prompts import PROMPT_TEMPLATES
 
 
@@ -77,6 +77,15 @@ CLOUD_CASES = [
     ("编写一个分布式爬虫框架，支持代理池和反爬虫策略", "", "general_classify"),
     ("分析这段代码的时间复杂度和空间复杂度，找出可以优化的地方并给出具体方案", "", "general_classify"),
     ("评估这个系统的架构设计是否合理，给出重构建议和具体的实施方案", "", "general_classify"),
+
+    # 更多复杂代码任务
+    ("实现一个分布式限流器，支持滑动窗口和令牌桶算法，用Redis作为后端存储", "", "code_generation"),
+    ("设计一个支持多租户的SaaS架构，要求数据隔离、权限控制、计费系统", "", "code_generation"),
+    ("编写一个分布式任务调度器，支持Cron表达式、任务依赖、失败重试", "", "code_generation"),
+
+    # 复杂系统设计
+    ("设计一个高并发实时推荐系统，支持协同过滤和内容推荐，要求毫秒级响应", "", "general_classify"),
+    ("设计一个高可用的分布式配置中心，支持热更新、灰度发布、版本回滚", "", "general_classify"),
 ]
 
 # 边界用例（容易误判的）
@@ -94,6 +103,18 @@ EDGE_CASES = [
     ("翻译", "Hi", "local"),
     ("分类", "好", "local"),
     ("提取", "13812345678", "local"),
+
+    # 更多边界用例
+    ("翻译成英文", "你好世界", "local"),
+    ("提取邮箱", "联系 test@example.com", "local"),
+    ("排序数字", "5,3,8,1,9", "local"),
+    ("去重列表", "a,b,c,a,d,b", "local"),
+    ("统计词频", "hello world hello python hello", "local"),
+    ("格式化日期", "2024-03-15", "local"),
+    ("验证身份证", "110101199001011234", "local"),
+    ("转换编码", "base64编码: SGVsbG8=", "local"),
+    ("合并文本", "第一行\n第二行\n第三行", "local"),
+    ("拆分字符串", "a,b,c,d,e", "local"),
 ]
 
 
@@ -211,3 +232,110 @@ class TestRoutingAccuracy:
         for action, text, expected_type in type_cases:
             detected = detect_task_type(action, PROMPT_TEMPLATES)
             assert detected == expected_type, f"类型检测: {action} → {detected}, 期望 {expected_type}"
+
+    def test_task_decomposition(self):
+        """复合任务拆解测试"""
+        cases = [
+            ("分类并统计", "apple,banana,apple,cherry", ["分组", "统计"]),
+            ("排序并去重", "5,3,8,1,3,5", ["排序", "去除"]),
+            ("分类并重命名", "file1.txt file2.txt", ["分类", "建议"]),
+        ]
+        for action, text, expected_keywords in cases:
+            subtasks = decompose_complex_task(action, text)
+            assert len(subtasks) >= 2, f"拆解失败: {action} → {len(subtasks)} 个子任务"
+            for kw in expected_keywords:
+                assert any(kw in s.get("action", "") for s in subtasks), \
+                    f"拆解缺少关键词 '{kw}': {action} → {[s.get('action') for s in subtasks]}"
+
+    def test_score_range(self):
+        """评分范围测试 — 简单任务评分应低于复杂任务"""
+        simple_tasks = [
+            ("翻译", "Hi"),
+            ("分类", "好"),
+            ("提取", "123"),
+        ]
+        complex_tasks = [
+            ("设计一个分布式系统架构", ""),
+            ("实现一个高并发消息队列", ""),
+        ]
+
+        simple_scores = []
+        for action, text in simple_tasks:
+            task = Task(action=action, text=text)
+            decision = estimate_complexity(task)
+            simple_scores.append(decision["score"])
+
+        complex_scores = []
+        for action, text in complex_tasks:
+            task = Task(action=action, text=text)
+            decision = estimate_complexity(task)
+            complex_scores.append(decision["score"])
+
+        avg_simple = sum(simple_scores) / len(simple_scores)
+        avg_complex = sum(complex_scores) / len(complex_scores)
+        assert avg_simple < avg_complex, \
+            f"简单任务平均评分 {avg_simple:.2f} 应低于复杂任务 {avg_complex:.2f}"
+
+    def test_mandatory_local_override(self):
+        """强制本地模式覆盖测试"""
+        mandatory_cases = [
+            ("本地执行这个任务", "test"),
+            ("离线处理", "data"),
+            ("不上传数据", "secret"),
+        ]
+        for action, text in mandatory_cases:
+            task = Task(action=action, text=text)
+            decision = estimate_complexity(task)
+            assert decision["route"] == "local", f"强制本地失败: {action} → {decision['route']}"
+
+    def test_cloud_pattern_override(self):
+        """云端模式覆盖测试"""
+        cloud_cases = [
+            ("debug这个代码", ""),
+            ("重构项目架构", ""),
+            ("调试分布式系统", ""),
+        ]
+        for action, text in cloud_cases:
+            task = Task(action=action, text=text)
+            decision = estimate_complexity(task)
+            assert decision["route"] == "cloud", f"云端覆盖失败: {action} → {decision['route']}"
+
+    def test_learnable_weights(self):
+        """A3M 可学习权重系统测试"""
+        from weights import A3MWeights, WeightTracker
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = WeightTracker(tmpdir)
+
+            # 初始状态
+            stats = tracker.get_stats()
+            assert stats["total"] == 0
+            assert stats["current_threshold"] == 3.0
+
+            # 记录本地成功 → 阈值应升高
+            tracker.record_outcome("translation", "local", 1.5, True)
+            stats = tracker.get_stats()
+            assert stats["total"] == 1
+            assert stats["local_success"] == 1
+            assert tracker.get_weights().base_threshold > 3.0
+
+            # 记录本地失败 → 阈值应降低
+            old_threshold = tracker.get_weights().base_threshold
+            tracker.record_outcome("translation", "local", 1.5, False)
+            assert tracker.get_weights().base_threshold < old_threshold
+
+            # 记录云端成功 → 阈值微降
+            old_threshold = tracker.get_weights().base_threshold
+            tracker.record_outcome("code_generation", "cloud", 8.0, True)
+            assert tracker.get_weights().base_threshold <= old_threshold
+
+            # 阈值范围限制
+            for _ in range(100):
+                tracker.record_outcome("test", "local", 1.0, True)
+            assert tracker.get_weights().base_threshold <= 8.0
+
+            # 重置
+            tracker.reset()
+            assert tracker.get_weights().base_threshold == 3.0
