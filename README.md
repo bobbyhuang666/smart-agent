@@ -1,78 +1,109 @@
 # TaskRouter
 
-**智能任务路由系统：自动选择最佳本地模型，将简单任务路由到免费本地模型，复杂任务路由到云端 API，最大限度节约 token 成本。**
+**自进化的企业级 AI 成本优化引擎** — 自动路由任务到最佳模型，通过蒸馏闭环让本地模型持续变强，越用越省钱。
 
-支持多种本地模型（Qwen、Llama、Mistral、Phi、Gemma 等），自动发现已安装模型并按任务类型智能选择最佳模型。
-
-## 核心思想
-
-大多数"复杂任务"并非全部复杂——拆开后，部分子任务完全可以交给小模型免费执行：
-
-```
-用户: "分析电商销售数据并出报告"
-                                  ┌───────────────────┐
-拆解 →  ① 清洗数据    → LOCAL     │ Qwen-tool (免费)  │
-        ② 分类商品    → LOCAL     │ 3/5 = 60% 任务   │
-        ③ 统计销量    → LOCAL     │ 0 成本           │
-                                  ├───────────────────┤
-        ④ 趋势分析    → CLOUD     │ API (付费)        │
-        ⑤ 生成报告    → CLOUD     │ 2/5 = 40% 任务   │
-                                  └───────────────────┘
-```
-
-**收益：** 一个 5 步的任务，3 步免费本地执行，只花 2 步的 API 钱。
+> **核心差异化：** 不只是路由，而是会学习的路由。每次云端调用都在训练本地模型，系统随时间自我进化。
 
 ---
 
-## 目录
+## 为什么选择 TaskRouter？
 
-- [快速开始](#快速开始)
-- [API 服务](#api-服务)
-- [工作流程](#工作流程)
-- [拆解大任务](#拆解大任务)
-- [命令参考](#命令参考)
-- [Qwen2.5 能力边界](#qwen25-15b-能力边界)
-- [配置云端 API](#配置云端-api)
-- [实际场景示例](#实际场景示例)
-- [统计追踪](#统计追踪)
+| 特性 | TaskRouter | 其他路由工具 |
+|------|-----------|-------------|
+| **蒸馏学习闭环** | 云端响应 → 本地模型持续进化 | 只做静态路由 |
+| **中文企业场景** | 合同、发票、会议纪等专项模板 | 英文为主 |
+| **任务拆解** | 复合任务自动拆分为子任务独立路由 | 单层分类路由 |
+| **自适应阈值** | 根据历史成功率动态调整路由策略 | 固定阈值 |
+| **数据隐私** | PII 自动检测脱敏后再发送云端 | 无隐私保护 |
+| **企业级审计** | 完整操作日志 + 配额管理 | 无审计能力 |
+
+---
+
+## 工作原理
+
+```
+用户任务 ─→ A3M 多信号评估 ─→ 五层路由决策
+                              │
+                              ├→ 语义缓存命中 → 0ms, 0 token
+                              ├→ 规则引擎兜底 → 0ms, 100% 准确
+                              ├→ 本地模型执行 → ~1-2s, 免费
+                              ├→ 递归拆解混合 → 部分本地+部分云端
+                              └→ 云端 API 调用 → 按量付费
+                                    │
+                                    ▼
+                              蒸馏采集 → Judge 评判 → Few-Shot 注入
+                                    │
+                                    ▼
+                              本地模型变强 → 更多任务走本地 → 更省钱
+```
+
+**关键：** 每次云端调用都在"训练"本地模型，系统越用越聪明。
 
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
+# 1. 安装
 pip3 install requests
-ollama pull qwen-tool      # 推荐：支持工具调用的 Qwen 模型
+ollama pull qwen-tool
 
 # 2. 设置别名
 alias sma="python3 /path/to/task-router/scripts/task_router.py"
 
-# 3. 验证
+# 3. 执行任务
 sma --task "翻译成中文" --text "Hello World"
-# 输出: 你好世界
+# → 本地执行，免费，1-2秒
 
+# 4. 查看累计节约
 sma --stats
-# 查看累计节约金额
 
-# 4. 查看可用模型
-sma --models
-# 自动发现 Ollama 已安装模型，按能力评分排序
+# 5. 启动 Web 仪表盘
+bash start_server.sh
+# 访问 http://localhost:8930
 ```
+
+---
+
+## 中文企业场景
+
+内置 6 个中文企业专项模板，开箱即用：
+
+| 场景 | 命令示例 | 路由 |
+|------|---------|------|
+| 合同条款提取 | `sma --task "合同条款提取" --text "..."` | 本地 |
+| 发票解析 | `sma --task "发票信息提取" --text "..."` | 本地 |
+| 会议纪要整理 | `sma --task "会议纪要整理" --text "..."` | 本地/云端 |
+| 客户反馈分类 | `sma --task "客户反馈分类" --text "..."` | 本地 |
+| 数据报表分析 | `sma --task "数据分析报告" --text "..."` | 云端 |
+| 商品分类统计 | `sma --task "分类并统计" --text "..."` | 混合 |
+
+---
+
+## 数据隐私保护
+
+自动检测并脱敏敏感信息后再发送到云端：
+
+```python
+from scripts.privacy import PrivacyFilter
+
+pf = PrivacyFilter()
+result = pf.anonymize("请联系 13812345678 或 test@example.com")
+# → "请联系 [手机号]_0 或 [邮箱]_0"
+
+original = pf.deanonymize(result.text)
+# → "请联系 13812345678 或 test@example.com"
+```
+
+支持检测：手机号、身份证、邮箱、银行卡、IP 地址、护照号码。
+
+---
 
 ## API 服务
 
-启动 Web 仪表盘和 REST API：
-
 ```bash
-# 启动服务器（默认端口 8930）
-bash start_server.sh
-
-# 或直接运行
 python3 scripts/api_server.py --port 8930
 ```
-
-API 端点：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -82,296 +113,43 @@ API 端点：
 | POST | /api/batch | 批量处理（支持并发） |
 | GET | /api/stats | 使用统计 |
 | GET | /api/models | 模型列表 |
-| GET | /api/health | 健康检查 |
-| GET | /api/history | 任务历史 |
+| GET | /api/audit | 审计日志 |
 | GET | / | Web 仪表盘 |
 
-示例：
+---
+
+## 学习闭环可视化
+
+查看系统如何随时间进化：
 
 ```bash
-# 执行任务
-curl -X POST http://localhost:8930/api/task \
-  -H "Content-Type: application/json" \
-  -d '{"action":"翻译成中文","text":"Hello world"}'
-
-# 批量处理（并发=3）
-curl -X POST http://localhost:8930/api/batch \
-  -H "Content-Type: application/json" \
-  -d '{"tasks":[{"action":"翻译成中文","text":"Hello"},{"action":"判断情感","text":"很好"}],"concurrency":3}'
+python3 scripts/learning_viz.py           # 完整报告
+python3 scripts/learning_viz.py --days 7  # 最近7天
+python3 scripts/learning_viz.py --json    # JSON格式
 ```
 
 ---
 
-## 工作流程
-
-### 场景一：单步简单任务
-
-直接交给 Qwen：
-
-```bash
-sma --task "分类" --text "photo.jpg, report.pdf, notes.txt"
-# → 本地执行，免费，1-2秒
-```
-
-### 场景二：复杂大任务（核心功能）
-
-拆解 → 逐子任务路由 → 混合执行：
-
-```bash
-# 第 1 步：拆解任务，看哪些可以走本地
-sma --decompose "整理桌面文件"
-
-# 输出:
-#   拆解为 4 个子任务
-#   🟢 扫描文件       → LOCAL (免费)
-#   🟢 按扩展名分类   → LOCAL (免费)
-#   🟢 建议目录结构   → LOCAL (免费)
-#   🔵 生成整理脚本   → CLOUD (付费)
-
-# 第 2 步：生成本地部分的执行计划
-sma --decompose "整理桌面文件" --json > plan.json
-
-# 第 3 步：执行（本地子任务自动跑，云端子任务标记）
-sma --plan plan.json
-```
-
-### 场景三：手动创建计划
-
-```bash
-# 创建 plan.json
-cat > plan.json << 'EOF'
-{
-  "task": "销售数据分析",
-  "subtasks": [
-    {"id": 1, "action": "按类别分类商品", "text": "iPhone15:100台, 华为Mate60:80台", "route": "local"},
-    {"id": 2, "action": "按销量排序",      "text": "iPhone15:100台, 华为Mate60:80台", "route": "local"},
-    {"id": 3, "action": "分析推广策略",    "text": "iPhone15:100台, 华为Mate60:80台", "route": "cloud"}
-  ]
-}
-EOF
-
-sma --plan plan.json
-```
-
----
-
-## 拆解大任务
-
-### 预设模板
-
-| 模板 | 子任务 | 节约 |
-|------|--------|------|
-| 电商分析 | 清洗 → 分类 → 统计 → 分析 → 报告 | ~60% |
-| 文件整理 | 扫描 → 分类 → 建议 → 生成脚本 | ~75% |
-| 文档处理 | 提取 → 分类 → 概括 → 分析 → 报告 | ~60% |
-
-### 通用拆解（自动检测关键词）
-
-当任务不含预设模板关键词时，自动识别操作步骤：
-
-```bash
-sma --decompose "提取关键词、分类内容、分析趋势、生成报告"
-# 自动识别 4 个操作步骤，本地走 2 步，云端走 2 步
-```
-
----
-
-## 命令参考
-
-### 任务执行
-
-| 命令 | 说明 |
-|------|------|
-| `sma --task "..." --text "..."` | 单任务执行，自动路由本地/云端 |
-| `sma --task "..." --force local` | 强制本地执行 |
-| `sma --task "..." --json` | JSON 格式输出 |
-
-### 任务拆解
-
-| 命令 | 说明 |
-|------|------|
-| `sma --decompose "大任务"` | 拆解任务，每步标记路由 |
-| `sma --decompose "..." --json` | 输出 JSON 格式计划 |
-| `sma --plan plan.json` | 按计划执行，每步独立路由 |
-| `sma --estimate "..."` | 快速估算走本地还是云端 |
-| `sma --classify "..."` | 细粒度分析是否适合小模型 |
-
-### 蒸馏系统
-
-| 命令 | 说明 |
-|------|------|
-| `sma --distill` | 评判待处理的训练对，提取优质 few-shot 样本 |
-| `sma --distill-stats` | 查看蒸馏系统健康状态 |
-| `sma --distill-export` | 导出可训练数据为 JSONL |
-
-### 工具
-
-| 命令 | 说明 |
-|------|------|
-| `sma -i` | 交互模式（逐条输入任务） |
-| `sma --batch tasks.json` | 批量执行多个任务 |
-| `sma --batch tasks.json --concurrency 3` | 并发批量执行 |
-| `sma --stats` | 查看累计节约金额（含缓存统计、每日统计） |
-| `sma --models` | 查看模型注册表（自动发现已安装模型） |
-| `sma --benchmark [model]` | 运行模型基准测试 |
-
-### 模型管理
+## 模型管理
 
 ```bash
 # 查看已安装模型及能力评分
 sma --models
 
-# 运行基准测试评估模型能力
+# 运行基准测试
 sma --benchmark qwen-tool:latest
-sma --benchmark qwen-tool-3b:latest
 
 # 质量评估
 python3 scripts/quality_eval.py --eval qwen-tool:latest
-python3 scripts/quality_eval.py --ab qwen-tool:latest qwen-tool-3b:latest
-```
-
----
-
-## 本地模型能力边界
-
-系统自动选择最佳本地模型。以下是典型能力范围：
-
-### ✅ 可以委托（准确率 85-95%）
-
-| 类型 | 示例 | 1.5B | 3B |
-|------|------|------|-----|
-| 文本分类/打标签 | 情感正负面判断 | ~90% | ~95% |
-| 文件分类整理 | 按扩展名归类 | ~85% | ~92% |
-| 格式转换 | CSV→JSON | ~90% | ~95% |
-| 关键词提取 | 抽人名、日期 | ~85% | ~92% |
-| 中英翻译 | 短句互译 | ~90% | ~92% |
-| 简短概括 | <200 字总结 | ~80% | ~88% |
-
-### ⚠️ 勉强可用（准确率 60-80%，输出不稳定）
-
-- 长文本概括 >500 字
-- 模糊分类（"什么风格"）
-- 非中英翻译
-
-### ❌ 不要委托（准确率 < 50%，用规则或云端）
-
-| 类型 | 处理方式 |
-|------|----------|
-| 按数值排序（商品:100台） | **规则兜底**（0ms，100%准确） |
-| 列表去重 | **规则兜底**（0ms，100%准确） |
-| 计数统计 | **规则兜底**（0ms，100%准确） |
-| 代码生成/调试 | 走云端 API |
-| 多步骤推理 | 走云端 API |
-| 数学计算 | 走云端 API |
-| 专业领域建议 | 走云端 API |
-
----
-
-## 配置云端 API
-
-系统兼容任何 OpenAI 格式的 API，通过环境变量配置：
-
-### DeepSeek（推荐，性价比高）
-
-```bash
-export CLOUD_API_URL="https://api.deepseek.com"
-export CLOUD_API_KEY="sk-xxxxxxxx"
-export CLOUD_MODEL="deepseek-chat"
-```
-
-### Claude
-
-```bash
-export CLOUD_API_URL="https://api.anthropic.com"
-export CLOUD_API_KEY="sk-ant-xxxxxxxx"
-export CLOUD_MODEL="claude-sonnet-4-6"
-```
-
-### OpenAI
-
-```bash
-export CLOUD_API_URL="https://api.openai.com"
-export CLOUD_API_KEY="sk-xxxxxxxx"
-export CLOUD_MODEL="gpt-4o"
-```
-
-### 不配置时
-
-跳过云端子任务，结果中标记 `[需要云端模型处理]`，本地子任务正常执行。
-
----
-
-## 实际场景示例
-
-### 场景：日常文件整理
-
-```bash
-sma --decompose "整理桌面所有文件"
-# → 3 步本地：扫描→分类→建议目录结构
-# → 1 步云端：生成整理脚本（可在 plan.json 中改为本地）
-
-# 执行
-sma --plan plan.json
-```
-
-### 场景：电商运营周报
-
-```bash
-sma --decompose "分析本周销售数据，分类商品表现，给出下周建议"
-
-# 拆解结果：
-# 1. 🟢 清洗数据       → 本地 (免费)
-# 2. 🟢 分类商品       → 本地 (免费)
-# 3. 🟢 统计销售额     → 本地 (免费)
-# 4. 🔵 分析趋势       → 云端 (付费)
-# 5. 🔵 生成建议       → 云端 (付费)
-
-# 预计节约：60% token
-```
-
-### 场景：代码审查
-
-```bash
-sma --decompose "审查这段代码：检查命名规范、逻辑错误、性能问题"
-
-# 拆解结果：
-# 1. 🔵 检查命名规范   → 云端 (需要代码理解)
-# 2. 🔵 检查逻辑错误   → 云端 (需要推理)
-# 3. 🔵 检查性能问题   → 云端 (需要专业知识)
-
-# 不适合本地，全走云端
-```
-
----
-
-## 统计追踪
-
-每次调用自动记录到 `~/.cache/task_router/usage.jsonl`：
-
-```bash
-sma --stats
-# TaskRouter 使用统计
-# ========================================
-# 本地调用: 15 次
-# 云端调用: 3 次
-# 缓存命中: 2 次
-# 总输入 tokens: 2,847
-# 总输出 tokens: 1,023
-# 累计节约成本: $0.0134
-# 
-# 语义缓存:
-#   缓存条目: 12
-#   缓存节约: $0.0053
+python3 scripts/quality_eval.py --ab model_a model_b
 ```
 
 ---
 
 ## 蒸馏系统
 
-每次云端调用或本地失败后云端修正，自动采集训练对：
-
 ```bash
-# 评判所有待处理的训练对
+# 评判待处理的训练对
 sma --distill
 
 # 查看蒸馏健康状态
@@ -381,57 +159,23 @@ sma --distill-stats
 sma --distill-export
 ```
 
-蒸馏流程：采集 HYPOTHESIS → Judge 评判（启发式+LLM两阶段）→ SUPPORTED/CONTESTED/OUTDATED → 提取最佳 few-shot 候选 → 注入 prompt 模板。
+蒸馏流程：云端响应 → Judge 评判 → SUPPORTED/CONTESTED → 提取 few-shot → 注入 prompt → 本地模型变强。
 
 ---
 
-## 语义缓存（自动工作）
+## 语义缓存
 
-重复任务自动命中缓存，无需额外配置：
+重复任务自动命中缓存，三级匹配：
 
-```bash
-# 首次执行（走模型）
-sma --task "分类" --text "苹果,香蕉,橘子"
-# → LOCAL, ~2s
+1. **exact** — 精确匹配
+2. **normalized** — 去空格、统一标点
+3. **fuzzy** — trigram Jaccard 相似度（阈值 0.85）
 
-# 相同任务再次执行（0 token 消耗）
-sma --task "分类" --text "苹果,香蕉,橘子"
-# → CACHE(exact), 0ms
-
-# 格式不同但内容相同（归一化命中）
-sma --task "分类" --text "苹果、香蕉、橘子"
-# → CACHE(normalized), 0ms
-```
-
-缓存基于字符 trigram Jaccard 相似度，支持三级匹配：
-1. **exact** — 精确 key 匹配
-2. **normalized** — 去空格、统一标点后匹配
-3. **fuzzy** — trigram Jaccard 模糊匹配（阈值 0.85）
-
-### 缓存 TTL 分级
-
-不同任务类型使用不同的缓存过期时间，确定性任务缓存更久：
-
-| 任务类型 | TTL | 原因 |
-|----------|-----|------|
-| 翻译/分类/格式化 | 7天 | 确定性高，结果不变 |
-| 提取 | 3天 | 较稳定 |
-| 摘要 | 1天 | 可能有变化 |
-| 其他 | 2天 | 默认 |
+不同任务类型使用不同 TTL：翻译/分类 7 天，提取 3 天，摘要 1 天。
 
 ---
 
-## 技术原理
-
-### 五层路由
-
-```
-子任务 ─→ 语义缓存（重复任务，含TTL）   → 0ms，0 token
-        ├→ 规则兜底（排序/去重/计数）   → 0ms，100% 准确
-        ├→ 本地模型（分类/翻译/提取）   → ~1-2s，免费
-        ├→ 递归拆解（混合执行）         → 部分本地+部分云端
-        └→ 云端 API（推理/分析/生成）   → 按量付费（含重试+熔断）
-```
+## 技术架构
 
 ### A3M 多信号路由
 
@@ -443,36 +187,62 @@ sma --task "分类" --text "苹果、香蕉、橘子"
 领域检测: 金融/法律/医疗/算法 +0.5
 ```
 
-评分 ≤ 阈值 → 本地免费执行，> 阈值 → 走云端 API。
-阈值根据历史成功率自适应调整（见 `--thresholds`）。
-
-### 云端重试 + 熔断机制
+### 云端重试 + 熔断
 
 ```
-云端调用 → 成功 → 重置失败计数
-         → 失败 → 重试2次（指数退避: 1s, 2s）
-                 → 仍然失败 → 累计失败次数
-                 → 连续3次失败 → 触发熔断（120秒内跳过云端）
-                 → 熔断期间 → 保留本地输出 + 警告标记
+失败 → 重试2次（指数退避）→ 连续3次失败 → 熔断120秒 → 期间保留本地输出
 ```
 
-### 输出验证 + 云端降级
+### 输出验证 + 降级
 
 ```
-本地执行完成 → 验证输出质量（长度/失败信号词/任务特定检查/重复检测）
-    ├→ 通过 → 直接返回结果
-    └→ 不通过 → 自动回退云端 → 采集修正对用于蒸馏
-              → 云端熔断中 → 保留本地输出 + 警告
+本地执行 → 验证质量 → 不通过 → 自动回退云端 → 采集修正对用于蒸馏
 ```
 
-### 动态 Few-Shot 选择
+---
 
-从蒸馏池中按能力类型（classification/translation/extraction 等）查询 SUPPORTED 对，按质量分降序 + 多样性过滤，自动注入 prompt。每次云端调用都让本地模型变得更强。
+## 命令参考
 
-### 提示词优化 + 压缩
+| 命令 | 说明 |
+|------|------|
+| `sma --task "..." --text "..."` | 单任务执行 |
+| `sma --task "..." --force local` | 强制本地 |
+| `sma --decompose "大任务"` | 拆解任务 |
+| `sma --estimate "..."` | 预估路由 |
+| `sma --batch tasks.json` | 批量执行 |
+| `sma --batch tasks.json --concurrency 3` | 并发批量 |
+| `sma --stats` | 使用统计 |
+| `sma --models` | 模型列表 |
+| `sma --benchmark [model]` | 基准测试 |
+| `sma --distill` | 蒸馏评判 |
+| `sma --distill-stats` | 蒸馏状态 |
+| `sma -i` | 交互模式 |
 
-针对 Qwen2.5 1.5B 做了 13 种任务类型的专属提示词模板，每个模板含 2-3 个少样本示例，准确率提升 20-40%。长 prompt 自动压缩（去冗余、截断示例），减少 token 消耗。
+---
 
-### License
+## 配置云端 API
+
+```bash
+# DeepSeek（推荐，性价比高）
+export CLOUD_API_URL="https://api.deepseek.com"
+export CLOUD_API_KEY="sk-xxxxxxxx"
+export CLOUD_MODEL="deepseek-chat"
+
+# Claude
+export CLOUD_API_URL="https://api.anthropic.com"
+export CLOUD_API_KEY="sk-ant-xxxxxxxx"
+export CLOUD_MODEL="claude-sonnet-4-6"
+
+# OpenAI
+export CLOUD_API_URL="https://api.openai.com"
+export CLOUD_API_KEY="sk-xxxxxxxx"
+export CLOUD_MODEL="gpt-4o"
+```
+
+不配置时，跳过云端子任务，本地子任务正常执行。
+
+---
+
+## License
 
 MIT

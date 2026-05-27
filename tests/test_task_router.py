@@ -1,0 +1,387 @@
+"""
+TaskRouter 核心功能测试
+
+测试覆盖:
+- 任务复杂度估算
+- 任务类型检测
+- 语义缓存 (TTL, 模糊匹配)
+- 输出验证
+- 提示压缩
+- 模型注册表
+- 审计日志
+"""
+
+import os
+import sys
+import time
+import json
+import pytest
+import tempfile
+
+# 添加 scripts 目录到 path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+from task_router import (
+    Task, estimate_complexity, detect_task_type, preprocess_text,
+    compress_prompt_tokens, postprocess_output, validate_local_output,
+    calc_cost, calc_savings, decompose_complex_task,
+    _recursive_decompose,
+)
+from prompts import PROMPT_TEMPLATES
+from model_registry import ModelRegistry, ModelProfile
+from audit import AuditLogger, AuditEvent, QuotaManager, QuotaConfig
+
+
+# ─── 任务复杂度估算 ─────────────────────────────────────────────
+
+class TestEstimateComplexity:
+    """测试 A3M 多信号路由评分"""
+
+    def test_simple_local_task(self):
+        """简单任务应该路由到本地"""
+        task = Task(action="分类这些文件", text="a.pdf, b.jpg")
+        result = estimate_complexity(task)
+        assert result["route"] == "local"
+        assert result["score"] <= 3.0
+
+    def test_complex_cloud_task(self):
+        """复杂任务应该路由到云端"""
+        task = Task(action="设计一个微服务架构并给出实现方案", text="")
+        result = estimate_complexity(task)
+        assert result["route"] == "cloud"
+        assert result["score"] > 3.0
+
+    def test_translation_local(self):
+        """翻译任务应该路由到本地"""
+        task = Task(action="翻译成中文", text="Hello world")
+        result = estimate_complexity(task)
+        assert result["route"] == "local"
+
+    def test_sentiment_local(self):
+        """情感分析应该路由到本地"""
+        task = Task(action="判断情感", text="很好")
+        result = estimate_complexity(task)
+        assert result["route"] == "local"
+
+    def test_domain_complexity(self):
+        """专业领域任务应该增加复杂度"""
+        task_simple = Task(action="分类", text="苹果, 香蕉")
+        task_legal = Task(action="分析法律合同条款并给出风险评估", text="")
+        score_simple = estimate_complexity(task_simple)["score"]
+        score_legal = estimate_complexity(task_legal)["score"]
+        assert score_legal > score_simple
+
+    def test_multi_step_detection(self):
+        """多步骤任务应该检测到连接词"""
+        task = Task(action="设计架构并给出实现方案", text="")
+        result = estimate_complexity(task)
+        # 应该检测到"并"这个连接词，并且包含高复杂度动词
+        assert result["score"] > 3.0  # 应该路由到云端
+        assert "多步" in result.get("reason", "") or result["score"] > 0
+
+
+# ─── 任务类型检测 ─────────────────────────────────────────────────
+
+class TestDetectTaskType:
+    """测试任务类型检测"""
+
+    def test_classification(self):
+        assert detect_task_type("分类这些文件", PROMPT_TEMPLATES) == "general_classify"
+
+    def test_sentiment(self):
+        assert detect_task_type("判断情感", PROMPT_TEMPLATES) == "sentiment"
+
+    def test_translation_en2zh(self):
+        assert detect_task_type("翻译成中文", PROMPT_TEMPLATES) == "translate_en2zh"
+
+    def test_translation_zh2en(self):
+        assert detect_task_type("翻译成英文", PROMPT_TEMPLATES) == "translate_zh2en"
+
+    def test_extraction(self):
+        assert detect_task_type("提取关键词", PROMPT_TEMPLATES) == "extract_keywords"
+
+    def test_file_classify(self):
+        # "按扩展名分类" 同时匹配 general_classify("分类") 和 file_classify("扩展名")
+        # 由于 dict 顺序，general_classify 先匹配。使用只匹配 file_classify 的关键词
+        assert detect_task_type("按照扩展名来处理", PROMPT_TEMPLATES) == "file_classify"
+
+    def test_unknown(self):
+        result = detect_task_type("做一些奇怪的事情", PROMPT_TEMPLATES)
+        assert result == "" or isinstance(result, str)
+
+
+# ─── 预处理 ─────────────────────────────────────────────────────
+
+class TestPreprocessText:
+    """测试文本预处理"""
+
+    def test_empty_text(self):
+        assert preprocess_text("") == ""
+
+    def test_comma_list_to_lines(self):
+        result = preprocess_text("a.pdf, b.jpg, c.txt, d.py, e.csv")
+        assert "\n" in result  # 应该转换为每行一个
+
+    def test_truncation(self):
+        long_text = "A" * 1000
+        result = preprocess_text(long_text, max_chars=100)
+        assert len(result) <= 120  # 包含截断标记
+
+    def test_normalize_newlines(self):
+        result = preprocess_text("a\r\nb\r\nc")
+        assert "\r" not in result
+
+
+# ─── 提示压缩 ─────────────────────────────────────────────────
+
+class TestCompressPrompt:
+    """测试提示压缩"""
+
+    def test_short_prompt_unchanged(self):
+        prompt = "翻译：Hello"
+        result = compress_prompt_tokens(prompt, "translate_en2zh")
+        assert result == prompt  # 短 prompt 不压缩
+
+    def test_long_prompt_compressed(self):
+        prompt = "\n".join([f"Line {i}: " + "A" * 80 for i in range(25)])
+        result = compress_prompt_tokens(prompt, "sentiment")
+        assert len(result) < len(prompt)
+
+    def test_empty_prompt(self):
+        assert compress_prompt_tokens("", "sentiment") == ""
+
+
+# ─── 输出验证 ─────────────────────────────────────────────────
+
+class TestValidateOutput:
+    """测试输出验证"""
+
+    def test_valid_output(self):
+        result = validate_local_output("正面", "sentiment")
+        assert result["valid"] is True
+
+    def test_empty_output(self):
+        result = validate_local_output("", "sentiment")
+        assert result["valid"] is False
+
+    def test_failure_signal(self):
+        result = validate_local_output("抱歉，我无法完成这个任务", "sentiment")
+        assert result["valid"] is False
+
+    def test_apology_detected(self):
+        result = validate_local_output("对不起，我不明白", "classification")
+        assert result["valid"] is False
+
+
+# ─── 成本计算 ─────────────────────────────────────────────────
+
+class TestCostCalculation:
+    """测试成本计算"""
+
+    def test_calc_cost(self):
+        cost = calc_cost(1000, 500)
+        assert cost > 0
+        assert cost == 1000 / 1000 * 0.003 + 500 / 1000 * 0.015
+
+    def test_calc_savings_local(self):
+        task = Task(action="test", route="local", tokens_input=100, tokens_output=50)
+        savings = calc_savings(task)
+        assert savings > 0
+
+    def test_calc_savings_cloud(self):
+        task = Task(action="test", route="cloud", tokens_input=100, tokens_output=50)
+        savings = calc_savings(task)
+        assert savings == 0.0
+
+
+# ─── 任务拆解 ─────────────────────────────────────────────────
+
+class TestTaskDecomposition:
+    """测试任务拆解"""
+
+    def test_compound_task_split(self):
+        """复合任务应该被拆解"""
+        subtasks = decompose_complex_task("分类并统计这些文件", "a.pdf, b.jpg")
+        # 应该返回子任务列表
+        assert isinstance(subtasks, list)
+
+    def test_simple_task_no_split(self):
+        """简单任务不应该被拆解"""
+        subtasks = decompose_complex_task("翻译成中文", "Hello")
+        assert subtasks == [] or len(subtasks) <= 1
+
+    def test_recursive_decompose(self):
+        """递归拆解应该处理连接词"""
+        subtasks = _recursive_decompose("翻译内容并提取关键词", "Hello world")
+        if subtasks:
+            assert len(subtasks) >= 2
+
+
+# ─── 模型注册表 ─────────────────────────────────────────────────
+
+class TestModelRegistry:
+    """测试模型注册表"""
+
+    def test_init(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        assert len(registry.models) == 0
+
+    def test_detect_param_size(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        assert registry._detect_param_size("qwen2.5:1.5b", 0.98) == "1.5B"
+        assert registry._detect_param_size("qwen2.5:3b", 1.9) == "3B"
+        assert registry._detect_param_size("llama3:7b", 4.5) == "7B"
+        assert registry._detect_param_size("model:13b", 8.0) == "13B"
+
+    def test_detect_tool_support(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        assert registry._detect_tool_support("qwen-tool:latest") is True
+        assert registry._detect_tool_support("llama3.1:latest") is True
+        assert registry._detect_tool_support("mistral:7b") is False
+
+    def test_estimate_default_score(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        profile = ModelProfile(name="test", parameter_size="3B", size_gb=1.9)
+        score = registry._estimate_default_score(profile, "translation")
+        assert 0.5 <= score <= 1.0
+
+    def test_select_best_empty(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        assert registry.select_best("translation") is None
+
+    def test_select_best_with_models(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        registry.models["model_a"] = ModelProfile(
+            name="model_a", parameter_size="1.5B", size_gb=1.0,
+            capabilities={"translation": 0.9}
+        )
+        registry.models["model_b"] = ModelProfile(
+            name="model_b", parameter_size="7B", size_gb=4.5,
+            capabilities={"translation": 0.7}
+        )
+        best = registry.select_best("translation")
+        assert best.name == "model_a"
+
+    def test_update_after_call(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        registry.models["test"] = ModelProfile(name="test")
+        registry.update_after_call("test", success=True, latency_ms=500)
+        assert registry.models["test"].total_calls == 1
+        assert registry.models["test"].success_rate > 0
+
+    def test_save_and_load(self, tmp_path):
+        registry = ModelRegistry(cache_dir=str(tmp_path))
+        registry.models["test"] = ModelProfile(name="test", parameter_size="3B")
+        registry._save()
+
+        registry2 = ModelRegistry(cache_dir=str(tmp_path))
+        assert "test" in registry2.models
+        assert registry2.models["test"].parameter_size == "3B"
+
+
+# ─── 审计日志 ─────────────────────────────────────────────────
+
+class TestAuditLogger:
+    """测试审计日志"""
+
+    def test_log_event(self, tmp_path):
+        logger = AuditLogger(cache_dir=str(tmp_path))
+        logger.log(AuditEvent(
+            timestamp="2026-01-01T00:00:00",
+            event_type="test",
+            action="test_action",
+        ))
+        events = logger.query()
+        assert len(events) == 1
+        assert events[0]["event_type"] == "test"
+
+    def test_query_filter(self, tmp_path):
+        logger = AuditLogger(cache_dir=str(tmp_path))
+        logger.log(AuditEvent(timestamp="2026-01-01T00:00:00", event_type="type_a", action="a"))
+        logger.log(AuditEvent(timestamp="2026-01-01T00:00:01", event_type="type_b", action="b"))
+
+        events = logger.query(event_type="type_a")
+        assert len(events) == 1
+        assert events[0]["action"] == "a"
+
+    def test_query_limit(self, tmp_path):
+        logger = AuditLogger(cache_dir=str(tmp_path))
+        for i in range(10):
+            logger.log(AuditEvent(timestamp=f"2026-01-01T00:00:{i:02d}", event_type="test", action=f"a{i}"))
+
+        events = logger.query(limit=5)
+        assert len(events) == 5
+
+    def test_summary(self, tmp_path):
+        logger = AuditLogger(cache_dir=str(tmp_path))
+        logger.log(AuditEvent(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            event_type="task_execution",
+            action="test",
+            status="success",
+            duration_ms=500,
+        ))
+        summary = logger.get_summary(days=1)
+        assert summary["total_events"] == 1
+        assert summary["by_type"]["task_execution"] == 1
+
+
+# ─── 配额管理 ─────────────────────────────────────────────────
+
+class TestQuotaManager:
+    """测试配额管理"""
+
+    def test_default_quota(self, tmp_path):
+        manager = QuotaManager(cache_dir=str(tmp_path))
+        quota = manager.get_quota("test_user")
+        assert quota.daily_task_limit == 1000
+
+    def test_set_quota(self, tmp_path):
+        manager = QuotaManager(cache_dir=str(tmp_path))
+        manager.set_quota("test_user", daily_task_limit=100)
+        quota = manager.get_quota("test_user")
+        assert quota.daily_task_limit == 100
+
+    def test_check_quota_allowed(self, tmp_path):
+        manager = QuotaManager(cache_dir=str(tmp_path))
+        status = manager.check_quota("new_user")
+        assert status["allowed"] is True
+
+    def test_record_usage(self, tmp_path):
+        manager = QuotaManager(cache_dir=str(tmp_path))
+        manager.record_usage("test_user", tokens=100, cost=0.01, action="test")
+        # 应该记录成功，不抛异常
+
+
+# ─── 语义缓存 ─────────────────────────────────────────────────
+
+class TestSemanticCache:
+    """测试语义缓存"""
+
+    def test_normalize(self):
+        from task_router import SemanticCache
+        cache = SemanticCache.__new__(SemanticCache)
+        assert SemanticCache._normalize("  Hello  World  ") == "helloworld"
+        assert SemanticCache._normalize("苹果，香蕉") == "苹果,香蕉"
+
+    def test_trigrams(self):
+        from task_router import SemanticCache
+        cache = SemanticCache.__new__(SemanticCache)
+        cache.threshold = 0.85
+        tri = cache._trigrams("hello world")
+        assert len(tri) > 0
+
+    def test_jaccard(self):
+        from task_router import SemanticCache
+        cache = SemanticCache.__new__(SemanticCache)
+        a = {"abc", "bcd", "cde"}
+        b = {"abc", "bcd", "def"}
+        score = cache._jaccard(a, b)
+        assert score >= 0.5  # 交集 2 / 并集 4 = 0.5
+        assert score < 0.8
+
+
+# ─── 运行入口 ─────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

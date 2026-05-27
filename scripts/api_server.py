@@ -1,5 +1,5 @@
 """
-TaskRouter API 服务器
+TaskRouter API 服务器 (异步版本)
 
 提供 REST API 和 Web 仪表盘，用于：
 - 任务路由 API（兼容 OpenAI 格式）
@@ -17,10 +17,12 @@ import os
 import sys
 import json
 import time
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+import asyncio
 from datetime import datetime
+from typing import Any
+
+import aiohttp
+from aiohttp import web
 
 # 添加 scripts 目录到 path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,81 +37,74 @@ from audit import get_audit_logger, get_quota_manager
 
 # ─── API 处理器 ──────────────────────────────────────────────────
 
-class TaskRouterAPI(BaseHTTPRequestHandler):
-    """HTTP API 处理器"""
+class TaskRouterHandler:
+    """异步 HTTP API 处理器"""
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-        params = parse_qs(parsed.query)
+    def __init__(self):
+        self.app = web.Application()
+        self._setup_routes()
 
-        routes = {
-            "/": self._serve_dashboard,
-            "/api/stats": self._api_stats,
-            "/api/models": self._api_models,
-            "/api/cache": self._api_cache_stats,
-            "/api/health": self._api_health,
-            "/api/history": self._api_history,
-            "/api/audit": self._api_audit,
-            "/api/audit/summary": self._api_audit_summary,
-        }
+    def _setup_routes(self):
+        """设置路由"""
+        # API 路由
+        self.app.router.add_post("/api/task", self._api_task)
+        self.app.router.add_post("/api/estimate", self._api_estimate)
+        self.app.router.add_post("/api/decompose", self._api_decompose)
+        self.app.router.add_post("/api/batch", self._api_batch)
+        self.app.router.add_post("/api/benchmark", self._api_benchmark)
 
-        handler = routes.get(path)
-        if handler:
-            handler(params)
-        elif path.startswith("/api/"):
-            self._json_response({"error": "Not found"}, 404)
+        # OpenAI 兼容路由
+        self.app.router.add_post("/v1/chat/completions", self._api_openai_chat)
+
+        # GET 路由
+        self.app.router.add_get("/api/stats", self._api_stats)
+        self.app.router.add_get("/api/models", self._api_models)
+        self.app.router.add_get("/api/cache", self._api_cache_stats)
+        self.app.router.add_get("/api/health", self._api_health)
+        self.app.router.add_get("/api/history", self._api_history)
+        self.app.router.add_get("/api/audit", self._api_audit)
+        self.app.router.add_get("/api/audit/summary", self._api_audit_summary)
+
+        # 仪表盘
+        self.app.router.add_get("/", self._serve_dashboard)
+
+        # CORS 中间件
+        self.app.middlewares.append(self._cors_middleware)
+
+    @web.middleware
+    async def _cors_middleware(self, request: web.Request, handler):
+        """CORS 中间件"""
+        if request.method == "OPTIONS":
+            response = web.Response()
         else:
-            self._serve_static(path)
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-
-        try:
-            body = self._read_body()
-        except Exception as e:
-            self._json_response({"error": str(e)}, 400)
-            return
-
-        routes = {
-            "/api/task": self._api_task,
-            "/api/estimate": self._api_estimate,
-            "/api/decompose": self._api_decompose,
-            "/api/batch": self._api_batch,
-            "/api/benchmark": self._api_benchmark,
-        }
-
-        handler = routes.get(path)
-        if handler:
-            handler(body)
-        else:
-            self._json_response({"error": "Not found"}, 404)
-
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self._set_cors_headers()
-        self.end_headers()
+            try:
+                response = await handler(request)
+            except web.HTTPException as ex:
+                response = ex
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
 
     # ─── API 端点 ─────────────────────────────────────────────
 
-    def _api_task(self, body):
+    async def _api_task(self, request: web.Request) -> web.Response:
         """执行单个任务"""
+        body = await request.json()
         action = body.get("action", body.get("prompt", ""))
         text = body.get("text", body.get("input", ""))
         force = body.get("force", "")
         files = body.get("files", [])
 
         if not action:
-            self._json_response({"error": "缺少 action 参数"}, 400)
-            return
+            return web.json_response({"error": "缺少 action 参数"}, status=400)
 
         task = Task(action=action, text=text, files=files)
         start = time.time()
-        result = run_task(task, force_route=force)
+        result = await asyncio.to_thread(run_task, task, force_route=force)
         elapsed = int((time.time() - start) * 1000)
 
-        self._json_response({
+        return web.json_response({
             "output": result.output,
             "route": result.route,
             "model": result.model_used,
@@ -119,39 +114,39 @@ class TaskRouterAPI(BaseHTTPRequestHandler):
             "cost_saved": result.cost_saved,
         })
 
-    def _api_estimate(self, body):
+    async def _api_estimate(self, request: web.Request) -> web.Response:
         """估算任务路由"""
+        body = await request.json()
         action = body.get("action", body.get("prompt", ""))
         if not action:
-            self._json_response({"error": "缺少 action 参数"}, 400)
-            return
+            return web.json_response({"error": "缺少 action 参数"}, status=400)
         result = estimate(action)
-        self._json_response(result)
+        return web.json_response(result)
 
-    def _api_decompose(self, body):
+    async def _api_decompose(self, request: web.Request) -> web.Response:
         """拆解复杂任务"""
+        body = await request.json()
         action = body.get("action", body.get("prompt", ""))
         text = body.get("text", "")
         if not action:
-            self._json_response({"error": "缺少 action 参数"}, 400)
-            return
+            return web.json_response({"error": "缺少 action 参数"}, status=400)
         subtasks = decompose_complex_task(action, text)
         if not subtasks:
             # 尝试递归拆解
             from task_router import _recursive_decompose
             subtasks = _recursive_decompose(action, text) or []
-        self._json_response({"task": action, "subtasks": subtasks})
+        return web.json_response({"task": action, "subtasks": subtasks})
 
-    def _api_batch(self, body):
+    async def _api_batch(self, request: web.Request) -> web.Response:
         """批量任务处理"""
+        body = await request.json()
         tasks = body.get("tasks", [])
         concurrency = body.get("concurrency", 1)
         if not tasks:
-            self._json_response({"error": "缺少 tasks 数组"}, 400)
-            return
+            return web.json_response({"error": "缺少 tasks 数组"}, status=400)
 
         start = time.time()
-        results = run_batch(tasks, concurrency=concurrency)
+        results = await asyncio.to_thread(run_batch, tasks, concurrency=concurrency)
         elapsed = int((time.time() - start) * 1000)
 
         output = []
@@ -164,43 +159,43 @@ class TaskRouterAPI(BaseHTTPRequestHandler):
                 "time_ms": r.time_ms,
                 "cost_saved": r.cost_saved,
             })
-        self._json_response({
+        return web.json_response({
             "results": output,
             "count": len(output),
             "total_time_ms": elapsed,
             "concurrency": concurrency,
         })
 
-    def _api_stats(self, params=None):
+    async def _api_stats(self, request: web.Request) -> web.Response:
         """使用统计"""
         stats_text = show_usage_stats()
-        self._json_response({"stats": stats_text})
+        return web.json_response({"stats": stats_text})
 
-    def _api_models(self, params=None):
+    async def _api_models(self, request: web.Request) -> web.Response:
         """模型列表"""
         registry = get_model_registry()
         registry.discover()
-        self._json_response(registry.get_status())
+        return web.json_response(registry.get_status())
 
-    def _api_cache_stats(self, params=None):
+    async def _api_cache_stats(self, request: web.Request) -> web.Response:
         """缓存统计"""
         stats = cache.stats()
-        self._json_response(stats)
+        return web.json_response(stats)
 
-    def _api_health(self, params=None):
+    async def _api_health(self, request: web.Request) -> web.Response:
         """健康检查"""
-        self._json_response({
+        return web.json_response({
             "status": "healthy",
-            "version": "2.3",
+            "version": "2.0",
             "timestamp": datetime.now().isoformat(),
-            "local_model": CONFIG["local_model"],
-            "cloud_configured": bool(CONFIG["cloud_api_key"]),
+            "local_model": CONFIG.local_model,
+            "cloud_configured": bool(CONFIG.cloud_api_key),
         })
 
-    def _api_history(self, params=None):
+    async def _api_history(self, request: web.Request) -> web.Response:
         """最近任务历史"""
-        log_file = os.path.join(CONFIG["cache_dir"], "usage.jsonl")
-        limit = int(params.get("limit", ["20"])[0]) if params else 20
+        log_file = os.path.join(CONFIG.cache_dir, "usage.jsonl")
+        limit = int(request.query.get("limit", "20"))
         entries = []
         if os.path.exists(log_file):
             with open(log_file) as f:
@@ -210,70 +205,107 @@ class TaskRouterAPI(BaseHTTPRequestHandler):
                         entries.append(json.loads(line.strip()))
                     except json.JSONDecodeError:
                         pass
-        self._json_response({"history": entries, "count": len(entries)})
+        return web.json_response({"history": entries, "count": len(entries)})
 
-    def _api_benchmark(self, body):
+    async def _api_benchmark(self, request: web.Request) -> web.Response:
         """运行基准测试"""
+        body = await request.json()
         model = body.get("model")
         registry = get_model_registry()
         registry.discover()
-        results = registry.run_benchmark(model)
-        self._json_response({"results": results})
+        results = await asyncio.to_thread(registry.run_benchmark, model)
+        return web.json_response({"results": results})
 
-    def _api_audit(self, params=None):
+    async def _api_audit(self, request: web.Request) -> web.Response:
         """查询审计日志"""
         audit = get_audit_logger()
-        limit = int(params.get("limit", ["50"])[0]) if params else 50
-        event_type = params.get("type", [None])[0] if params else None
+        limit = int(request.query.get("limit", "50"))
+        event_type = request.query.get("type")
         events = audit.query(event_type=event_type, limit=limit)
-        self._json_response({"events": events, "count": len(events)})
+        return web.json_response({"events": events, "count": len(events)})
 
-    def _api_audit_summary(self, params=None):
+    async def _api_audit_summary(self, request: web.Request) -> web.Response:
         """审计摘要"""
         audit = get_audit_logger()
-        days = int(params.get("days", ["7"])[0]) if params else 7
+        days = int(request.query.get("days", "7"))
         summary = audit.get_summary(days=days)
-        self._json_response(summary)
+        return web.json_response(summary)
+
+    async def _api_openai_chat(self, request: web.Request) -> web.Response:
+        """OpenAI 兼容的 Chat Completions API"""
+        body = await request.json()
+        messages = body.get("messages", [])
+        if not messages:
+            return web.json_response({
+                "error": {
+                    "message": "messages is required",
+                    "type": "invalid_request_error",
+                    "code": "missing_parameter",
+                }
+            }, status=400)
+
+        # 从 messages 中提取 action 和 text
+        action = ""
+        text = ""
+
+        if len(messages) == 1:
+            content = messages[0].get("content", "")
+            if "：" in content:
+                parts = content.split("：", 1)
+                action = parts[0].strip()
+                text = parts[1].strip()
+            elif ":" in content:
+                parts = content.split(":", 1)
+                action = parts[0].strip()
+                text = parts[1].strip()
+            else:
+                action = content
+        else:
+            for msg in messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "system":
+                    action = content
+                elif role == "user":
+                    text = content if not action else text + " " + content
+
+        if not action:
+            action = text
+            text = ""
+
+        task = Task(action=action, text=text)
+        start = time.time()
+        result = await asyncio.to_thread(run_task, task)
+        elapsed = time.time() - start
+
+        response = {
+            "id": f"chatcmpl-{int(time.time()*1000)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": body.get("model", "task-router"),
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": result.output,
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": result.tokens_input,
+                "completion_tokens": result.tokens_output,
+                "total_tokens": result.tokens_input + result.tokens_output,
+            },
+            "system_fingerprint": f"fp_{result.route}",
+        }
+
+        return web.json_response(response)
 
     # ─── 仪表盘 ──────────────────────────────────────────────
 
-    def _serve_dashboard(self, params=None):
+    async def _serve_dashboard(self, request: web.Request) -> web.Response:
         """主仪表盘页面"""
-        html = DASHBOARD_HTML
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self._set_cors_headers()
-        self.end_headers()
-        self.wfile.write(html.encode("utf-8"))
-
-    def _serve_static(self, path):
-        """静态文件服务"""
-        self._json_response({"error": "Not found"}, 404)
-
-    # ─── 工具方法 ─────────────────────────────────────────────
-
-    def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
-            return {}
-        body = self.rfile.read(length)
-        return json.loads(body.decode("utf-8"))
-
-    def _json_response(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._set_cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
-
-    def _set_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
-    def log_message(self, format, *args):
-        """静默日志（可配置）"""
-        pass
+        return web.Response(text=DASHBOARD_HTML, content_type="text/html", charset="utf-8")
 
 
 # ─── 仪表盘 HTML ────────────────────────────────────────────────
@@ -464,25 +496,25 @@ setInterval(loadStats, 10000);
 
 def start_server(host="127.0.0.1", port=8930):
     """启动 API 服务器"""
-    server = HTTPServer((host, port), TaskRouterAPI)
-    print(f"TaskRouter API 服务器启动")
+    handler = TaskRouterHandler()
+    app = handler.app
+
+    print(f"TaskRouter API 服务器启动 (异步)")
     print(f"  地址: http://{host}:{port}")
     print(f"  仪表盘: http://{host}:{port}/")
     print(f"  API 文档:")
-    print(f"    POST /api/task      - 执行任务")
-    print(f"    POST /api/estimate  - 预估路由")
-    print(f"    POST /api/decompose - 拆解任务")
-    print(f"    POST /api/batch     - 批量处理")
-    print(f"    GET  /api/stats     - 使用统计")
-    print(f"    GET  /api/models    - 模型列表")
-    print(f"    GET  /api/health    - 健康检查")
-    print(f"    GET  /api/history   - 任务历史")
+    print(f"    POST /api/task              - 执行任务")
+    print(f"    POST /api/estimate          - 预估路由")
+    print(f"    POST /api/decompose         - 拆解任务")
+    print(f"    POST /api/batch             - 批量处理")
+    print(f"    POST /v1/chat/completions   - OpenAI 兼容 API")
+    print(f"    GET  /api/stats             - 使用统计")
+    print(f"    GET  /api/models            - 模型列表")
+    print(f"    GET  /api/health            - 健康检查")
+    print(f"    GET  /api/history           - 任务历史")
     print()
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n服务器已停止")
-        server.server_close()
+
+    web.run_app(app, host=host, port=port, print=None)
 
 
 if __name__ == "__main__":

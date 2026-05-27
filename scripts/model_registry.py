@@ -176,12 +176,12 @@ class ModelRegistry:
     def _detect_param_size(self, name: str, size_gb: float) -> str:
         """根据模型名称和大小推断参数量"""
         name_lower = name.lower()
-        # 从名称推断
+        # 从名称推断（更长的模式优先匹配，避免 "3b" 误匹配 "13b"）
         for pattern, size in [
-            ("1.5b", "1.5B"), ("0.5b", "0.5B"), ("3b", "3B"),
-            ("7b", "7B"), ("8b", "8B"), ("13b", "13B"),
-            ("14b", "14B"), ("32b", "32B"), ("70b", "70B"),
-            ("72b", "72B"), ("e4b", "4B"), ("e2b", "2B"),
+            ("1.5b", "1.5B"), ("0.5b", "0.5B"),
+            ("72b", "72B"), ("70b", "70B"), ("32b", "32B"),
+            ("14b", "14B"), ("13b", "13B"), ("8b", "8B"),
+            ("7b", "7B"), ("3b", "3B"), ("e4b", "4B"), ("e2b", "2B"),
         ]:
             if pattern in name_lower:
                 return size
