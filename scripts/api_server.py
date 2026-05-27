@@ -18,6 +18,7 @@ import sys
 import json
 import time
 import asyncio
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -27,12 +28,19 @@ from aiohttp import web
 # 添加 scripts 目录到 path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from logger import setup_logging
+log = setup_logging()
+
 from task_router import (
     run_task, Task, estimate, classify_task, show_usage_stats,
     decompose_complex_task, CONFIG, cache,
     get_model_registry, run_batch,
 )
 from audit import get_audit_logger, get_quota_manager
+
+# API 认证密钥（环境变量设置，为空则不启用认证）
+API_KEY = os.environ.get("TASKROUTER_API_KEY", "")
+PUBLIC_PATHS = {"/", "/api/health"}
 
 
 # ─── API 处理器 ──────────────────────────────────────────────────
@@ -68,8 +76,34 @@ class TaskRouterHandler:
         # 仪表盘
         self.app.router.add_get("/", self._serve_dashboard)
 
-        # CORS 中间件
+        # 中间件（顺序：先认证，再 CORS）
+        self.app.middlewares.append(self._auth_middleware)
         self.app.middlewares.append(self._cors_middleware)
+
+    @web.middleware
+    async def _auth_middleware(self, request: web.Request, handler):
+        """API 认证中间件（Bearer token 或 X-API-Key）"""
+        if not API_KEY or request.path in PUBLIC_PATHS:
+            return await handler(request)
+
+        # 检查 Bearer token
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer ") and auth_header[7:] == API_KEY:
+            return await handler(request)
+
+        # 检查 X-API-Key header
+        if request.headers.get("X-API-Key") == API_KEY:
+            return await handler(request)
+
+        # 检查 query 参数 ?api_key=
+        if request.query.get("api_key") == API_KEY:
+            return await handler(request)
+
+        log.warning("认证失败: %s %s (来源: %s)", request.method, request.path, request.remote)
+        return web.json_response(
+            {"error": "未授权：请提供有效的 API Key（Bearer token 或 X-API-Key header）"},
+            status=401,
+        )
 
     @web.middleware
     async def _cors_middleware(self, request: web.Request, handler):
@@ -83,7 +117,7 @@ class TaskRouterHandler:
                 response = ex
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key"
         return response
 
     # ─── API 端点 ─────────────────────────────────────────────
@@ -103,6 +137,9 @@ class TaskRouterHandler:
         start = time.time()
         result = await asyncio.to_thread(run_task, task, force_route=force)
         elapsed = int((time.time() - start) * 1000)
+
+        log.info("任务完成: route=%s model=%s time=%dms action=%s",
+                 result.route, result.model_used, elapsed, action[:50])
 
         return web.json_response({
             "output": result.output,
@@ -186,7 +223,7 @@ class TaskRouterHandler:
         """健康检查"""
         return web.json_response({
             "status": "healthy",
-            "version": "4.3.0",
+            "version": "4.5.0",
             "timestamp": datetime.now().isoformat(),
             "local_model": CONFIG.local_model,
             "cloud_configured": bool(CONFIG.cloud_api_key),
@@ -295,6 +332,8 @@ class TaskRouterHandler:
         start = time.time()
         result = await asyncio.to_thread(run_task, task)
         elapsed = time.time() - start
+
+        log.info("OpenAI API: route=%s model=%s time=%.0fms", result.route, result.model_used, elapsed * 1000)
 
         response = {
             "id": f"chatcmpl-{int(time.time()*1000)}",
@@ -517,9 +556,13 @@ def start_server(host="127.0.0.1", port=8930):
     handler = TaskRouterHandler()
     app = handler.app
 
+    auth_status = "已启用" if API_KEY else "未设置（开放访问）"
+    log.info("TaskRouter API v4.5.0 启动: %s:%d, 认证: %s", host, port, auth_status)
+
     print(f"TaskRouter API 服务器启动 (异步)")
     print(f"  地址: http://{host}:{port}")
     print(f"  仪表盘: http://{host}:{port}/")
+    print(f"  认证: {auth_status}")
     print(f"  API 文档:")
     print(f"    POST /api/task              - 执行任务")
     print(f"    POST /api/estimate          - 预估路由")

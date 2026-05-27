@@ -10,9 +10,12 @@ import sys
 import os
 import json
 import time
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
+
+log = logging.getLogger("task_router")
 
 # ─── 模块导入 ──────────────────────────────────────────────────
 
