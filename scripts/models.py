@@ -16,30 +16,67 @@ _model_registry_lock = threading.Lock()
 # ─── 熔断器（线程安全）─────────────────────────────────────────
 
 class CircuitBreaker:
-    """云端 API 熔断器"""
+    """云端 API 熔断器（支持 CLOSED → OPEN → HALF_OPEN → CLOSED）"""
 
-    def __init__(self, max_failures: int = 3, cooldown_seconds: int = 120):
+    STATE_CLOSED = "closed"
+    STATE_OPEN = "open"
+    STATE_HALF_OPEN = "half_open"
+
+    def __init__(self, max_failures: int = 3, cooldown_seconds: int = 120, half_open_max: int = 1):
         self._lock = threading.Lock()
         self.failures: int = 0
         self.last_failure: float = 0.0
         self.open_until: float = 0.0
+        self.state: str = self.STATE_CLOSED
         self.max_failures = max_failures
         self.cooldown_seconds = cooldown_seconds
+        self.half_open_max = half_open_max
+        self.half_open_attempts: int = 0
 
     def is_open(self) -> bool:
         with self._lock:
-            return time.time() < self.open_until
+            if self.state == self.STATE_OPEN:
+                if time.time() >= self.open_until:
+                    self.state = self.STATE_HALF_OPEN
+                    self.half_open_attempts = 0
+                    return False
+                return True
+            return False
+
+    def allow_request(self) -> bool:
+        """判断是否允许请求通过（OPEN 状态冷却后进入 HALF_OPEN 放行一次探测）"""
+        with self._lock:
+            if self.state == self.STATE_CLOSED:
+                return True
+            if self.state == self.STATE_OPEN:
+                if time.time() >= self.open_until:
+                    self.state = self.STATE_HALF_OPEN
+                    self.half_open_attempts = 0
+                    return True
+                return False
+            if self.state == self.STATE_HALF_OPEN:
+                return self.half_open_attempts < self.half_open_max
+            return True
 
     def record_success(self) -> None:
         with self._lock:
+            if self.state == self.STATE_HALF_OPEN:
+                self.state = self.STATE_CLOSED
             self.failures = 0
             self.open_until = 0.0
+            self.half_open_attempts = 0
 
     def record_failure(self) -> None:
         with self._lock:
+            if self.state == self.STATE_HALF_OPEN:
+                self.state = self.STATE_OPEN
+                self.open_until = time.time() + self.cooldown_seconds
+                self.half_open_attempts = 0
+                return
             self.failures += 1
             self.last_failure = time.time()
             if self.failures >= self.max_failures:
+                self.state = self.STATE_OPEN
                 self.open_until = time.time() + self.cooldown_seconds
 
     def remaining_seconds(self) -> int:
@@ -49,11 +86,13 @@ class CircuitBreaker:
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
             return {
+                "state": self.state,
                 "failures": self.failures,
                 "last_failure": self.last_failure,
                 "open_until": self.open_until,
                 "max_failures": self.max_failures,
                 "cooldown_seconds": self.cooldown_seconds,
+                "half_open_attempts": self.half_open_attempts,
             }
 
 
@@ -138,14 +177,17 @@ def call_cloud_api(prompt: str, text: str = "") -> dict[str, Any]:
             "tokens_input": 0, "tokens_output": 0, "time_ms": 0,
         }
 
-    # 熔断检查
-    if circuit_breaker.is_open():
+    # 熔断检查（支持半开状态探测）
+    if not circuit_breaker.allow_request():
         remaining = circuit_breaker.remaining_seconds()
         return {
             "text": f"[云端熔断中] 连续失败{circuit_breaker.failures}次，{remaining}秒后重试",
             "tokens_input": 0, "tokens_output": 0, "time_ms": 0,
             "circuit_open": True,
         }
+    if circuit_breaker.state == CircuitBreaker.STATE_HALF_OPEN:
+        with circuit_breaker._lock:
+            circuit_breaker.half_open_attempts += 1
 
     import requests
 

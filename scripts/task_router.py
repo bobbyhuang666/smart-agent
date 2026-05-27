@@ -252,161 +252,188 @@ def auto_collect_on_local_failure(task: Task, local_output: str, cloud_output: s
     store.add_pair(pair)
 
 
-# ─── 核心执行 ──────────────────────────────────────────────────
+# ─── 核心执行（拆分为子函数）────────────────────────────────────
 
-def run_task(task: Task, force_route: str = "") -> Task:
-    """执行单个任务（核心入口）"""
-    if force_route:
-        task.route = force_route
-        task.model_used = CONFIG.local_model if force_route == "local" else CONFIG.cloud_model
-    else:
-        decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
-        task.route = decision["route"]
-        task.model_used = CONFIG.local_model if decision["route"] == "local" else CONFIG.cloud_model
-
-    # 语义缓存查找
+def _check_cache(task: Task) -> Optional[Task]:
+    """检查语义缓存，命中则返回填充好的 Task，否则返回 None"""
     cached = cache.get(task.action, task.text)
-    if cached:
-        task.output = cached.get("result", {}).get("text", cached.get("output", ""))
-        task.route = f"cache({cached.get('match_type', 'hit')})"
-        task.model_used = "cache"
-        task.tokens_input = 0
-        task.tokens_output = 0
-        task.time_ms = 0
-        task.cost_saved = round(calc_cost(
-            cached.get("result", {}).get("tokens_input", 0),
-            cached.get("result", {}).get("tokens_output", 0)), 6)
-        log_usage(task)
+    if not cached:
+        return None
+    task.output = cached.get("result", {}).get("text", cached.get("output", ""))
+    task.route = f"cache({cached.get('match_type', 'hit')})"
+    task.model_used = "cache"
+    task.tokens_input = 0
+    task.tokens_output = 0
+    task.time_ms = 0
+    task.cost_saved = round(calc_cost(
+        cached.get("result", {}).get("tokens_input", 0),
+        cached.get("result", {}).get("tokens_output", 0)), 6)
+    return task
+
+
+def _run_local_subtasks(task: Task, subtasks: list[dict], clean_text: str) -> bool:
+    """执行本地子任务列表，成功则填充 task 并返回 True"""
+    if not subtasks:
+        return False
+    outputs: list[str] = []
+    for st in subtasks:
+        st_type = st.get("type", "")
+        st_action = st.get("action", "")
+        st_text = st.get("text", clean_text)
+        rule_result = rule_execute(st_type, st_text)
+        if rule_result:
+            outputs.append(rule_result)
+            continue
+        st_prompt = build_optimized_prompt(st_type, st_action, st_text, task.files)
+        st_prompt = enrich_prompt_with_examples(st_prompt, st_type, st_text)
+        result = call_ollama(st_prompt, max_tokens=get_max_tokens(st_type))
+        out = postprocess_output(result["text"], st_type)
+        outputs.append(f"[{st_type}]\n{out}")
+        task.tokens_input += result["tokens_input"]
+        task.tokens_output += result["tokens_output"]
+        task.time_ms += result["time_ms"]
+    task.output = "\n\n".join(outputs)
+    task.model_used = CONFIG.local_model
+    task.cost_saved = calc_savings(task)
+    return True
+
+
+def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
+    """执行单个本地任务，返回 result 字典"""
+    task_type = detect_task_type(clean_action, PROMPT_TEMPLATES)
+
+    # 规则执行
+    rule_result = rule_execute(task_type, clean_text or clean_action)
+    if rule_result:
+        task.output = rule_result
+        task.model_used = "rule_engine"
+        task.route = "local(rule)"
+        return {"text": rule_result, "tokens_input": 0, "tokens_output": 0, "time_ms": 0}
+
+    # 智能模型选择
+    selected_model: Optional[str] = None
+    try:
+        registry = get_model_registry()
+        if registry.models:
+            capability = TASK_TO_CAPABILITY.get(task_type, "")
+            if capability:
+                best = registry.select_best(capability, prefer_speed=True)
+                if best and best.name != CONFIG.local_model:
+                    selected_model = best.name
+    except Exception:
+        pass
+
+    prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
+    prompt = enrich_prompt_with_examples(prompt, task_type, clean_text)
+    prompt = compress_prompt_tokens(prompt, task_type)
+    max_tokens = get_max_tokens(task_type)
+    result = call_ollama(prompt, model=selected_model, max_tokens=max_tokens)
+    task.output = postprocess_output(result["text"], task_type)
+    task.model_used = selected_model or CONFIG.local_model
+    return result
+
+
+def _validate_and_fallback(task: Task, result: dict, task_type: str) -> dict:
+    """验证本地输出质量，必要时降级到云端"""
+    validation = validate_local_output(task.output, task_type)
+    cap = TASK_TO_CAPABILITY.get(task_type, "")
+    if cap:
+        cap_tracker.record(cap, success=validation["valid"],
+                           score=1.0 if validation["valid"] else 0.3, task_type=task_type)
+
+    if validation["valid"]:
+        return result
+
+    if CONFIG.cloud_api_key:
+        cloud_result = call_cloud_api(task.action, task.text)
+        if cloud_result.get("circuit_open"):
+            task.output += f"\n\n[警告: 本地输出质量不佳，云端熔断中 - {validation['reason']}]"
+            task.route = "local(degraded)"
+        else:
+            auto_collect_on_local_failure(task, task.output, cloud_result["text"], "quality_fallback")
+            task.output = cloud_result["text"]
+            task.route = "cloud_fallback"
+            task.model_used = CONFIG.cloud_model
+            result = cloud_result
+            task.cost_saved = 0
+    else:
+        task.output += f"\n\n[警告: 本地输出质量可能不佳 - {validation['reason']}]"
+
+    return result
+
+
+def _run_local(task: Task) -> Task:
+    """执行本地任务"""
+    clean_text = preprocess_text(task.text or "")
+    clean_action = preprocess_text(task.action, max_chars=200)
+
+    # 尝试拆解复合任务
+    subtasks = decompose_complex_task(clean_action, clean_text)
+    if not subtasks:
+        subtasks = _recursive_decompose(clean_action, clean_text)
+
+    if _run_local_subtasks(task, subtasks, clean_text):
+        cache.set(task.action, task.text,
+                  {"text": task.output, "tokens_input": task.tokens_input, "tokens_output": task.tokens_output})
         return task
 
-    if task.route == "local":
-        clean_text = preprocess_text(task.text or "")
-        clean_action = preprocess_text(task.action, max_chars=200)
+    # 单任务
+    task_type = detect_task_type(clean_action, PROMPT_TEMPLATES)
+    result = _run_local_single(task, clean_action, clean_text)
 
-        # 尝试拆解复合任务
-        subtasks = decompose_complex_task(clean_action, clean_text)
-        if not subtasks:
-            subtasks = _recursive_decompose(clean_action, clean_text)
-        if subtasks:
-            outputs: list[str] = []
-            for st in subtasks:
-                st_type = st.get("type", "")
-                st_action = st.get("action", "")
-                st_text = st.get("text", clean_text)
-                rule_result = rule_execute(st_type, st_text)
-                if rule_result:
-                    outputs.append(rule_result)
-                    continue
-                st_prompt = build_optimized_prompt(st_type, st_action, st_text, task.files)
-                st_prompt = enrich_prompt_with_examples(st_prompt, st_type, st_text)
-                result = call_ollama(st_prompt, max_tokens=get_max_tokens(st_type))
-                out = postprocess_output(result["text"], st_type)
-                outputs.append(f"[{st_type}]\n{out}")
-                task.tokens_input += result["tokens_input"]
-                task.tokens_output += result["tokens_output"]
-                task.time_ms += result["time_ms"]
-            task.output = "\n\n".join(outputs)
-            task.model_used = CONFIG.local_model
-            task.cost_saved = calc_savings(task)
-            cache.set(task.action, task.text,
-                      {"text": task.output, "tokens_input": task.tokens_input, "tokens_output": task.tokens_output})
-            log_usage(task)
-            return task
+    # 规则引擎命中时直接返回
+    if task.model_used == "rule_engine":
+        cache.set(task.action, task.text, {"text": task.output, "tokens_input": 0, "tokens_output": 0})
+        return task
 
-        # 单任务
-        task_type = detect_task_type(clean_action, PROMPT_TEMPLATES)
-
-        # 规则执行
-        rule_result = rule_execute(task_type, clean_text or clean_action)
-        if rule_result:
-            task.output = rule_result
-            task.model_used = "rule_engine"
-            task.route = "local(rule)"
-            cache.set(task.action, task.text, {"text": rule_result, "tokens_input": 0, "tokens_output": 0})
-            log_usage(task)
-            return task
-
-        # 智能模型选择
-        selected_model: Optional[str] = None
-        try:
-            registry = get_model_registry()
-            if registry.models:
-                capability = TASK_TO_CAPABILITY.get(task_type, "")
-                if capability:
-                    best = registry.select_best(capability, prefer_speed=True)
-                    if best and best.name != CONFIG.local_model:
-                        selected_model = best.name
-        except Exception:
-            pass
-
-        prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
-        prompt = enrich_prompt_with_examples(prompt, task_type, clean_text)
-        prompt = compress_prompt_tokens(prompt, task_type)
-        max_tokens = get_max_tokens(task_type)
-        result = call_ollama(prompt, model=selected_model, max_tokens=max_tokens)
-        task.output = postprocess_output(result["text"], task_type)
-        task.model_used = selected_model or CONFIG.local_model
-
-        # 输出验证 + 云端降级
-        validation = validate_local_output(task.output, task_type)
-        cap = TASK_TO_CAPABILITY.get(task_type, "")
-        if cap:
-            cap_tracker.record(cap, success=validation["valid"],
-                               score=1.0 if validation["valid"] else 0.3, task_type=task_type)
-
-        if not validation["valid"] and CONFIG.cloud_api_key:
-            cloud_result = call_cloud_api(task.action, task.text)
-            if cloud_result.get("circuit_open"):
-                task.output += f"\n\n[警告: 本地输出质量不佳，云端熔断中 - {validation['reason']}]"
-                task.route = "local(degraded)"
-            else:
-                auto_collect_on_local_failure(task, task.output, cloud_result["text"], "quality_fallback")
-                task.output = cloud_result["text"]
-                task.route = "cloud_fallback"
-                task.model_used = CONFIG.cloud_model
-                result = cloud_result
-                task.cost_saved = 0
-        elif not validation["valid"]:
-            task.output += f"\n\n[警告: 本地输出质量可能不佳 - {validation['reason']}]"
-    else:
-        # 云端任务：尝试递归拆解
-        if not force_route:
-            decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
-        else:
-            decision = {"score": 9, "route": force_route}
-        if RECURSE_SCORE_MIN <= decision["score"] <= RECURSE_SCORE_MAX:
-            subtasks = _recursive_decompose(task.action, task.text)
-            if subtasks:
-                outputs = []
-                for st in subtasks:
-                    st_action = st.get("action", st.get("type", ""))
-                    st_text = st.get("text", task.text)
-                    st_task = Task(action=st_action, text=st_text)
-                    st_result = run_task(st_task)
-                    outputs.append(f"[{st_action[:30]}]({st_result.route})\n{st_result.output}")
-                    task.tokens_input += st_result.tokens_input
-                    task.tokens_output += st_result.tokens_output
-                    task.time_ms += st_result.time_ms
-                    task.cost_saved += st_result.cost_saved
-                task.output = "\n\n---\n\n".join(outputs)
-                task.route = "hybrid(recurse)"
-                task.model_used = "mixed"
-                if task.output and task.output.strip():
-                    cache.set(task.action, task.text,
-                              {"text": task.output, "tokens_input": task.tokens_input, "tokens_output": task.tokens_output})
-                log_usage(task)
-                return task
-
-        result = call_cloud_api(task.action, task.text)
-        task.output = result["text"]
-        auto_collect_on_cloud(task, result)
-
+    # 输出验证 + 云端降级
+    result = _validate_and_fallback(task, result, task_type)
     task.tokens_input = result.get("tokens_input", 0)
     task.tokens_output = result.get("tokens_output", 0)
     task.time_ms = result.get("time_ms", 0)
     task.cost_saved = calc_savings(task)
+    return task
 
-    if task.output and len(task.output.strip()) >= 1:
+
+def _run_cloud(task: Task, force_route: str) -> Task:
+    """执行云端任务（含递归拆解）"""
+    if not force_route:
+        decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
+    else:
+        decision = {"score": 9, "route": force_route}
+
+    if RECURSE_SCORE_MIN <= decision["score"] <= RECURSE_SCORE_MAX:
+        subtasks = _recursive_decompose(task.action, task.text)
+        if subtasks:
+            outputs = []
+            for st in subtasks:
+                st_action = st.get("action", st.get("type", ""))
+                st_text = st.get("text", task.text)
+                st_task = Task(action=st_action, text=st_text)
+                st_result = run_task(st_task)
+                outputs.append(f"[{st_action[:30]}]({st_result.route})\n{st_result.output}")
+                task.tokens_input += st_result.tokens_input
+                task.tokens_output += st_result.tokens_output
+                task.time_ms += st_result.time_ms
+                task.cost_saved += st_result.cost_saved
+            task.output = "\n\n---\n\n".join(outputs)
+            task.route = "hybrid(recurse)"
+            task.model_used = "mixed"
+            return task
+
+    result = call_cloud_api(task.action, task.text)
+    task.output = result["text"]
+    task.tokens_input = result.get("tokens_input", 0)
+    task.tokens_output = result.get("tokens_output", 0)
+    task.time_ms = result.get("time_ms", 0)
+    task.cost_saved = 0
+    auto_collect_on_cloud(task, result)
+    return task
+
+
+def _finalize_task(task: Task) -> None:
+    """写入缓存、日志、审计"""
+    if task.output and task.output.strip():
         cache.set(task.action, task.text,
                   {"text": task.output, "tokens_input": task.tokens_input, "tokens_output": task.tokens_output},
                   ttl_hours=CONFIG.get_cache_ttl(detect_task_type(task.action, PROMPT_TEMPLATES)))
@@ -429,6 +456,32 @@ def run_task(task: Task, force_route: str = "") -> Task:
     except Exception:
         pass
 
+
+def run_task(task: Task, force_route: str = "") -> Task:
+    """执行单个任务（核心入口）"""
+    # 1. 路由决策
+    if force_route:
+        task.route = force_route
+        task.model_used = CONFIG.local_model if force_route == "local" else CONFIG.cloud_model
+    else:
+        decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
+        task.route = decision["route"]
+        task.model_used = CONFIG.local_model if decision["route"] == "local" else CONFIG.cloud_model
+
+    # 2. 语义缓存查找
+    cached = _check_cache(task)
+    if cached:
+        log_usage(cached)
+        return cached
+
+    # 3. 执行
+    if task.route == "local":
+        task = _run_local(task)
+    else:
+        task = _run_cloud(task, force_route)
+
+    # 4. 收尾（缓存、日志、审计）
+    _finalize_task(task)
     return task
 
 
@@ -549,11 +602,13 @@ def show_usage_stats() -> str:
                 total_day = d["local"] + d["cloud"] + d["cache"]
                 result += f"  {day}: {total_day}次 (本地{d['local']}/云端{d['cloud']}/缓存{d['cache']}) 省${d['saved']:.4f}\n"
 
-    if circuit_breaker.failures > 0:
-        if circuit_breaker.is_open():
+    if circuit_breaker.state != "closed":
+        if circuit_breaker.state == "open":
             result += f"\n云端熔断器: 🔴 熔断中 (连续失败{circuit_breaker.failures}次, {circuit_breaker.remaining_seconds()}秒后恢复)\n"
-        else:
-            result += f"\n云端熔断器: 🟡 已恢复 (上次连续失败{circuit_breaker.failures}次)\n"
+        elif circuit_breaker.state == "half_open":
+            result += f"\n云端熔断器: 🟡 半开状态 (探测中)\n"
+    elif circuit_breaker.failures > 0:
+        result += f"\n云端熔断器: 🟢 已恢复 (上次连续失败{circuit_breaker.failures}次)\n"
 
     return result
 
@@ -641,6 +696,7 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     parser.add_argument("--distill", action="store_true", help="运行蒸馏")
     parser.add_argument("--distill-stats", action="store_true", help="蒸馏状态")
+    parser.add_argument("--distill-cleanup", action="store_true", help="清除过期蒸馏条目")
     parser.add_argument("--thresholds", action="store_true", help="自适应阈值")
     parser.add_argument("--models", action="store_true", help="模型列表")
     parser.add_argument("--benchmark", nargs="?", const="all", help="基准测试")
@@ -716,9 +772,15 @@ def main() -> None:
             print(f"  {cap:20s} | 成功率: {info['success_rate']:.0%} | 阈值: {info['threshold']:.1f} ({info['direction']})")
         return
 
+    if args.distill_cleanup:
+        removed = store.cleanup_expired()
+        print(f"已清除 {removed} 条过期蒸馏条目")
+        return
+
     if args.distill_stats:
         stats = store.get_stats()
-        print(f"蒸馏统计: 总计 {stats['total']} | SUPPORTED {stats['supported']}")
+        print(f"蒸馏统计: 总计 {stats['total']} | 活跃 {stats['active']} | 过期 {stats['expired']} | TTL {stats['ttl_days']}天")
+        print(f"  SUPPORTED: {stats['supported']}")
         for cap, count in stats.get("by_capability", {}).items():
             print(f"  {cap}: {count}")
         return

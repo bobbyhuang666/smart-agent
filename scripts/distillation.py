@@ -63,13 +63,19 @@ class DistillationPair:
 
 
 class DistillationStore:
-    """蒸馏数据存储"""
+    """蒸馏数据存储（含 TTL 遗忘机制）"""
 
-    def __init__(self, cache_dir: Optional[str] = None):
+    DEFAULT_TTL_DAYS = 90       # 默认过期天数
+    CONTESTED_TTL_DAYS = 14     # contested 状态更快过期
+    OUTDATED_TTL_DAYS = 7       # outdated 状态最快过期
+    MAX_PAIRS = 5000            # 最大条目数（FIFO 淘汰）
+
+    def __init__(self, cache_dir: Optional[str] = None, ttl_days: int = 0):
         config = get_config()
         self.cache_dir = cache_dir or config.cache_dir
         self.pairs_file = os.path.join(self.cache_dir, "distillation.jsonl")
         self.stats_file = os.path.join(self.cache_dir, "distillation_stats.json")
+        self.ttl_days = ttl_days or self.DEFAULT_TTL_DAYS
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _load_all(self) -> list[dict]:
@@ -91,10 +97,44 @@ class DistillationStore:
         with open(self.pairs_file, "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def _is_expired(self, pair: dict) -> bool:
+        """检查蒸馏对是否过期"""
+        pair_time = pair.get("time", "")
+        if not pair_time:
+            return False
+        try:
+            created = time.mktime(time.strptime(pair_time[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, OverflowError):
+            return False
+        state = pair.get("epistemic_state", PAIR_HYPOTHESIS)
+        if state == PAIR_OUTDATED:
+            ttl = self.OUTDATED_TTL_DAYS * 86400
+        elif state == PAIR_CONTESTED:
+            ttl = self.CONTESTED_TTL_DAYS * 86400
+        else:
+            ttl = self.ttl_days * 86400
+        return (time.time() - created) > ttl
+
+    def cleanup_expired(self) -> int:
+        """清除过期条目，返回删除数量"""
+        pairs = self._load_all()
+        before = len(pairs)
+        alive = [p for p in pairs if not self._is_expired(p)]
+        if len(alive) < before:
+            # FIFO 淘汰超出上限的旧条目
+            if len(alive) > self.MAX_PAIRS:
+                alive = alive[-self.MAX_PAIRS:]
+            with open(self.pairs_file, "w") as f:
+                for p in alive:
+                    f.write(json.dumps(p, ensure_ascii=False) + "\n")
+        return before - len(alive)
+
     def get_pairs(self, state: Optional[str] = None, capability: Optional[str] = None,
                   task_type: Optional[str] = None, min_score: float = 0.0,
                   limit: int = 0) -> list[dict]:
         pairs = self._load_all()
+        # 自动过滤过期条目
+        pairs = [p for p in pairs if not self._is_expired(p)]
         if state:
             pairs = [p for p in pairs if p.get("epistemic_state") == state]
         if capability:
@@ -129,7 +169,10 @@ class DistillationStore:
         pairs = self._load_all()
         by_state: dict[str, int] = {}
         by_capability: dict[str, int] = {}
+        expired = 0
         for p in pairs:
+            if self._is_expired(p):
+                expired += 1
             state = p.get("epistemic_state", "unknown")
             by_state[state] = by_state.get(state, 0) + 1
             cap = p.get("capability", "unknown")
@@ -137,9 +180,12 @@ class DistillationStore:
 
         return {
             "total": len(pairs),
+            "expired": expired,
+            "active": len(pairs) - expired,
             "by_state": by_state,
             "by_capability": by_capability,
             "supported": by_state.get(PAIR_SUPPORTED, 0),
+            "ttl_days": self.ttl_days,
         }
 
 

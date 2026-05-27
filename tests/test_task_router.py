@@ -381,6 +381,173 @@ class TestSemanticCache:
         assert score < 0.8
 
 
+# ─── 熔断器半开状态 ────────────────────────────────────────────
+
+class TestCircuitBreakerStates:
+    """测试 CircuitBreaker 三态转换: CLOSED → OPEN → HALF_OPEN → CLOSED"""
+
+    def test_initial_state_closed(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=3, cooldown_seconds=1)
+        assert cb.state == CircuitBreaker.STATE_CLOSED
+        assert cb.allow_request() is True
+
+    def test_trips_to_open_after_max_failures(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=3, cooldown_seconds=60)
+        for _ in range(3):
+            cb.record_failure()
+        assert cb.state == CircuitBreaker.STATE_OPEN
+        assert cb.allow_request() is False
+
+    def test_half_open_after_cooldown(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=2, cooldown_seconds=0)
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.state == CircuitBreaker.STATE_OPEN
+        # cooldown=0, allow_request should transition to half_open
+        assert cb.allow_request() is True
+        assert cb.state == CircuitBreaker.STATE_HALF_OPEN
+
+    def test_half_open_success_closes(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=2, cooldown_seconds=0)
+        cb.record_failure()
+        cb.record_failure()
+        cb.allow_request()  # → half_open
+        cb.record_success()
+        assert cb.state == CircuitBreaker.STATE_CLOSED
+        assert cb.failures == 0
+
+    def test_half_open_failure_reopens(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=2, cooldown_seconds=60)
+        cb.record_failure()
+        cb.record_failure()
+        # Force into half_open
+        with cb._lock:
+            cb.state = CircuitBreaker.STATE_HALF_OPEN
+            cb.open_until = 0
+        cb.record_failure()
+        assert cb.state == CircuitBreaker.STATE_OPEN
+
+    def test_to_dict_includes_state(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=3, cooldown_seconds=10)
+        d = cb.to_dict()
+        assert "state" in d
+        assert d["state"] == CircuitBreaker.STATE_CLOSED
+
+    def test_half_open_limits_attempts(self):
+        from models import CircuitBreaker
+        cb = CircuitBreaker(max_failures=2, cooldown_seconds=0, half_open_max=1)
+        cb.record_failure()
+        cb.record_failure()
+        cb.allow_request()  # → half_open, attempt 0 → allowed
+        with cb._lock:
+            cb.half_open_attempts = 1
+        assert cb.allow_request() is False  # exceeded half_open_max
+
+
+# ─── 蒸馏 TTL 遗忘机制 ────────────────────────────────────────
+
+class TestDistillationTTL:
+    """测试蒸馏数据 TTL 过期和清理"""
+
+    def test_is_expired_recent_pair(self, tmp_path):
+        from distillation import DistillationStore, PAIR_HYPOTHESIS
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=90)
+        pair = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "epistemic_state": PAIR_HYPOTHESIS}
+        assert store._is_expired(pair) is False
+
+    def test_is_expired_old_pair(self, tmp_path):
+        from distillation import DistillationStore, PAIR_HYPOTHESIS
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=30)
+        old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 31 * 86400))
+        pair = {"time": old_time, "epistemic_state": PAIR_HYPOTHESIS}
+        assert store._is_expired(pair) is True
+
+    def test_contested_expires_faster(self, tmp_path):
+        from distillation import DistillationStore, PAIR_CONTESTED
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=90)
+        # 20 days old: still within 90-day TTL but past 14-day contested TTL
+        old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 20 * 86400))
+        pair = {"time": old_time, "epistemic_state": PAIR_CONTESTED}
+        assert store._is_expired(pair) is True
+
+    def test_outdated_expires_fastest(self, tmp_path):
+        from distillation import DistillationStore, PAIR_OUTDATED
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=90)
+        old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 10 * 86400))
+        pair = {"time": old_time, "epistemic_state": PAIR_OUTDATED}
+        assert store._is_expired(pair) is True
+
+    def test_cleanup_expired_removes_old(self, tmp_path):
+        from distillation import DistillationStore, DistillationPair, PAIR_HYPOTHESIS
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=1)
+        # Add a fresh pair
+        pair1 = DistillationPair(prompt="test1", response="ok1")
+        store.add_pair(pair1)
+        # Add an expired pair manually
+        old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 2 * 86400))
+        expired = {"prompt": "old", "response": "expired", "time": old_time, "epistemic_state": PAIR_HYPOTHESIS}
+        with open(store.pairs_file, "a") as f:
+            f.write(json.dumps(expired) + "\n")
+        removed = store.cleanup_expired()
+        assert removed == 1
+        remaining = store._load_all()
+        assert len(remaining) == 1
+
+    def test_get_pairs_filters_expired(self, tmp_path):
+        from distillation import DistillationStore, DistillationPair, PAIR_SUPPORTED
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=1)
+        pair = DistillationPair(prompt="new", response="ok")
+        pair.epistemic_state = PAIR_SUPPORTED
+        store.add_pair(pair)
+        # Add expired
+        old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 2 * 86400))
+        expired = {"prompt": "old", "response": "gone", "time": old_time, "epistemic_state": PAIR_SUPPORTED}
+        with open(store.pairs_file, "a") as f:
+            f.write(json.dumps(expired) + "\n")
+        pairs = store.get_pairs()
+        assert len(pairs) == 1
+
+    def test_get_stats_includes_expired(self, tmp_path):
+        from distillation import DistillationStore, DistillationPair, PAIR_HYPOTHESIS
+        store = DistillationStore(cache_dir=str(tmp_path), ttl_days=1)
+        store.add_pair(DistillationPair(prompt="new", response="ok"))
+        old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 2 * 86400))
+        with open(store.pairs_file, "a") as f:
+            f.write(json.dumps({"prompt": "old", "response": "x", "time": old_time, "epistemic_state": PAIR_HYPOTHESIS}) + "\n")
+        stats = store.get_stats()
+        assert stats["expired"] == 1
+        assert stats["active"] == 1
+        assert stats["total"] == 2
+
+
+# ─── 缓存 TTL ─────────────────────────────────────────────────
+
+class TestCacheTTL:
+    """测试缓存 TTL 过期行为"""
+
+    def test_cache_entry_expires(self, tmp_path):
+        from cache import SemanticCache
+        c = SemanticCache(cache_dir=str(tmp_path))
+        c.set("test action", "text", {"text": "result"}, ttl_hours=0)
+        # ttl_hours=0 means expires immediately
+        time.sleep(0.01)
+        cached = c.get("test action", "text")
+        assert cached is None
+
+    def test_cache_entry_valid(self, tmp_path):
+        from cache import SemanticCache
+        c = SemanticCache(cache_dir=str(tmp_path))
+        c.set("test action", "text", {"text": "result"}, ttl_hours=24)
+        cached = c.get("test action", "text")
+        assert cached is not None
+
+
 # ─── 运行入口 ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
