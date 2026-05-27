@@ -10,7 +10,7 @@ echo "=== TaskRouter — 发布到 GitHub ==="
 
 # 1. 创建 GitHub 仓库（如果不存在）
 echo "[1/5] 确保 GitHub 仓库存在..."
-gh repo create "$REPO_NAME" --public --description "智能任务路由系统 — 将简单任务委托给本地 Ollama 模型以节约 token 成本" --yes 2>/dev/null || true
+gh repo create "$REPO_NAME" --public --description "自进化 AI 成本优化引擎 — A3M 多信号路由 + 蒸馏学习闭环，简单任务走本地免费，复杂任务走云端付费" --yes 2>/dev/null || true
 
 # 2. 准备 git 仓库
 echo "[2/5] 准备 git 仓库..."

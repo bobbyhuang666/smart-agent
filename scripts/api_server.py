@@ -416,7 +416,7 @@ button.secondary:hover { background: #64748b; }
 <body>
 <div class="header">
   <h1>TaskRouter Dashboard</h1>
-  <p>智能任务路由系统 — 本地优先，成本最优</p>
+  <p>自进化 AI 成本优化引擎 — A3M 多信号路由 + 蒸馏学习闭环</p>
 </div>
 <div class="container">
   <div class="grid" id="stats-grid">
