@@ -8,6 +8,10 @@ from typing import Any, Optional
 
 from config import get_config
 
+# 延迟加载的隐私过滤器单例（线程安全）
+_privacy_filter_instance = None
+_privacy_filter_lock = threading.Lock()
+
 
 # ─── 熔断器（线程安全）─────────────────────────────────────────
 
@@ -91,8 +95,8 @@ def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[i
 
         # 更新模型统计
         try:
-            from model_registry import get_model_registry
-            registry = get_model_registry()
+            from model_registry import ModelRegistry
+            registry = ModelRegistry(cache_dir=config.cache_dir)
             registry.update_after_call(
                 model, success=True, latency_ms=elapsed,
                 tokens_in=result["tokens_input"], tokens_out=result["tokens_output"]
@@ -103,8 +107,8 @@ def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[i
         return result
     except Exception as e:
         try:
-            from model_registry import get_model_registry
-            registry = get_model_registry()
+            from model_registry import ModelRegistry
+            registry = ModelRegistry(cache_dir=config.cache_dir)
             registry.update_after_call(model, success=False, latency_ms=0)
         except Exception:
             pass
@@ -145,9 +149,11 @@ def call_cloud_api(prompt: str, text: str = "") -> dict[str, Any]:
             text = text_anon.text
             anon_result.anonymized_count += text_anon.anonymized_count
 
-    messages = [{"role": "user", "content": prompt}]
     if text:
-        messages.append({"role": "user", "content": text})
+        full_content = f"{prompt}\n\n内容：\n{text}"
+    else:
+        full_content = prompt
+    messages = [{"role": "user", "content": full_content}]
 
     max_retries = 2
     last_error: Optional[Exception] = None
@@ -199,9 +205,17 @@ def call_cloud_api(prompt: str, text: str = "") -> dict[str, Any]:
 
 
 def _get_privacy_filter() -> Any:
-    """延迟加载隐私过滤器"""
-    try:
-        from privacy import PrivacyFilter
-        return PrivacyFilter()
-    except ImportError:
-        return None
+    """延迟加载隐私过滤器（线程安全单例）"""
+    global _privacy_filter_instance
+    if _privacy_filter_instance is not None:
+        return _privacy_filter_instance
+    with _privacy_filter_lock:
+        # 双重检查锁定
+        if _privacy_filter_instance is not None:
+            return _privacy_filter_instance
+        try:
+            from privacy import PrivacyFilter
+            _privacy_filter_instance = PrivacyFilter()
+        except ImportError:
+            pass
+    return _privacy_filter_instance

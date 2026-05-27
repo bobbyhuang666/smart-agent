@@ -78,11 +78,16 @@ TASK_TO_CAPABILITY: dict[str, str] = {
     "file_classify": "classification",
     "sentiment": "classification",
     "tag": "classification",
+    "feedback_classify": "classification",
     "translate_en2zh": "translation",
     "translate_zh2en": "translation",
     "extract_keywords": "extraction",
     "extract_info": "extraction",
+    "contract_clause": "extraction",
+    "invoice_parse": "extraction",
     "summarize_short": "summarization",
+    "meeting_minutes": "summarization",
+    "data_report": "summarization",
     "format_json": "formatting",
     "clean_data": "formatting",
     "dedup": "formatting",
@@ -90,6 +95,7 @@ TASK_TO_CAPABILITY: dict[str, str] = {
     "sort_alpha": "formatting",
     "rename_suggest": "formatting",
     "qa_short": "qa",
+    "_count": "formatting",
 }
 
 

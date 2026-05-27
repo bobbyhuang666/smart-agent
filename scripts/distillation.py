@@ -6,7 +6,7 @@ import os
 import json
 import time
 import hashlib
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 from config import get_config, TASK_TO_CAPABILITY

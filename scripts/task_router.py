@@ -10,8 +10,7 @@ import sys
 import os
 import json
 import time
-import re
-import unicodedata
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
@@ -52,6 +51,7 @@ store = DistillationStore(cache_dir=CONFIG.cache_dir)
 _model_registry = None
 _privacy_filter = None
 _cap_tracker = None
+_log_lock = threading.Lock()
 
 RECURSE_SCORE_MIN = CONFIG.recurse_score_min
 RECURSE_SCORE_MAX = CONFIG.recurse_score_max
@@ -214,8 +214,10 @@ def log_usage(task: Task) -> None:
         "cost_saved": task.cost_saved,
         "time_ms": task.time_ms,
     }
-    with open(log_file, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with _log_lock:
+        with open(log_file, "a") as f:
+            f.write(line)
 
 
 def calc_cost(input_tokens: int, output_tokens: int) -> float:
@@ -270,7 +272,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
     if cached:
         task.output = cached.get("result", {}).get("text", cached.get("output", ""))
         task.route = f"cache({cached.get('match_type', 'hit')})"
-        task.model_used = f"cache"
+        task.model_used = "cache"
         task.tokens_input = 0
         task.tokens_output = 0
         task.time_ms = 0
@@ -371,7 +373,10 @@ def run_task(task: Task, force_route: str = "") -> Task:
             task.output += f"\n\n[警告: 本地输出质量可能不佳 - {validation['reason']}]"
     else:
         # 云端任务：尝试递归拆解
-        decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold) if not force_route else {"score": 9, "route": force_route}
+        if not force_route:
+            decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
+        else:
+            decision = {"score": 9, "route": force_route}
         if RECURSE_SCORE_MIN <= decision["score"] <= RECURSE_SCORE_MAX:
             subtasks = _recursive_decompose(task.action, task.text)
             if subtasks:
@@ -389,7 +394,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
                 task.output = "\n\n---\n\n".join(outputs)
                 task.route = "hybrid(recurse)"
                 task.model_used = "mixed"
-                if task.output and len(task.output.strip()) >= 1:
+                if task.output and task.output.strip():
                     cache.set(task.action, task.text,
                               {"text": task.output, "tokens_input": task.tokens_input, "tokens_output": task.tokens_output})
                 log_usage(task)

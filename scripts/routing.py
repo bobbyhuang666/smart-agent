@@ -38,7 +38,7 @@ LOCAL_TASK_PATTERNS: list[str] = [
     "分类", "归类", "整理", "排序", "重命名", "移动文件", "复制",
     "提取", "摘录", "格式化", "转换", "翻译", "概括",
     "替换", "补全", "填充", "合并", "拼接", "分割", "拆分",
-    "排序", "过滤", "去重", "统计", "计数",
+    "过滤", "去重", "统计", "计数",
     "列出", "列举", "查询", "搜索",
     "属于哪", "是什么类型", "判定", "检查", "校验", "验证",
     "标记", "打标签",
@@ -228,7 +228,7 @@ def _recursive_decompose(action: str, text: str, depth: int = 0, max_depth: int 
     if depth >= max_depth:
         return None
 
-    connectors = ["并", "且", "然后", "再", "同时", "接着"]
+    connectors = ["再然后", "然后", "接着", "同时", "并且", "且", "并", "再"]
     for conn in connectors:
         if conn in action:
             parts = action.split(conn, 1)
