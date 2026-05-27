@@ -276,6 +276,7 @@ def _run_local_subtasks(task: Task, subtasks: list[dict], clean_text: str) -> bo
     if not subtasks:
         return False
     outputs: list[str] = []
+    all_rules = True
     for st in subtasks:
         st_type = st.get("type", "")
         st_action = st.get("action", "")
@@ -284,6 +285,7 @@ def _run_local_subtasks(task: Task, subtasks: list[dict], clean_text: str) -> bo
         if rule_result:
             outputs.append(rule_result)
             continue
+        all_rules = False
         st_prompt = build_optimized_prompt(st_type, st_action, st_text, task.files)
         st_prompt = enrich_prompt_with_examples(st_prompt, st_type, st_text)
         result = call_ollama(st_prompt, max_tokens=get_max_tokens(st_type))
@@ -293,7 +295,7 @@ def _run_local_subtasks(task: Task, subtasks: list[dict], clean_text: str) -> bo
         task.tokens_output += result["tokens_output"]
         task.time_ms += result["time_ms"]
     task.output = "\n\n".join(outputs)
-    task.model_used = CONFIG.local_model
+    task.model_used = "rule_engine" if all_rules else CONFIG.local_model
     task.cost_saved = calc_savings(task)
     return True
 
@@ -588,7 +590,8 @@ def show_usage_stats() -> str:
     result = (
         f"TaskRouter 使用统计\n{'='*40}\n"
         f"本地调用: {total_local} 次\n云端调用: {total_cloud} 次\n缓存命中: {total_cache} 次\n"
-        f"总输入 tokens: {total_input:,}\n总输出 tokens: {total_output:,}\n累计节约成本: ${total_saved:.4f}\n"
+        f"总输入 tokens: {total_input:,}\n总输出 tokens: {total_output:,}\n"
+        f"理论最大节约: ${total_saved:.4f} (若全部走云端需支付的费用)\n"
     )
     if cache_stats["total"] > 0:
         result += f"\n语义缓存:\n  缓存条目: {cache_stats['total']}\n  缓存节约: ${cache_stats['estimated_cost_saved']:.4f}\n"

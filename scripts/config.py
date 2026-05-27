@@ -3,8 +3,9 @@
 """
 
 import os
+import json
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Optional
 
 
@@ -61,8 +62,45 @@ class RouterConfig:
             )
 
     @classmethod
+    def from_yaml(cls, path: str) -> "RouterConfig":
+        """从 YAML 配置文件加载"""
+        if not os.path.exists(path):
+            return cls()
+        try:
+            import yaml
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            valid = {f.name for f in fields(cls)}
+            return cls(**{k: v for k, v in data.items() if k in valid})
+        except Exception:
+            return cls()
+
+    @classmethod
+    def from_json(cls, path: str) -> "RouterConfig":
+        """从 JSON 配置文件加载"""
+        if not os.path.exists(path):
+            return cls()
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            valid = {f.name for f in fields(cls)}
+            return cls(**{k: v for k, v in data.items() if k in valid})
+        except Exception:
+            return cls()
+
+    @classmethod
     def from_env(cls) -> "RouterConfig":
-        """从环境变量创建配置"""
+        """从配置文件或环境变量创建配置（优先级：YAML > JSON > 环境变量）"""
+        # 尝试从配置文件加载
+        for candidate in ["config.yaml", "config.yml", "config.json"]:
+            config_path = os.path.join(os.path.dirname(__file__), candidate)
+            if os.path.exists(config_path):
+                if candidate.endswith((".yaml", ".yml")):
+                    cfg = cls.from_yaml(config_path)
+                else:
+                    cfg = cls.from_json(config_path)
+                # 如果配置文件中有值，覆盖环境变量默认值
+                return cfg
         return cls()
 
     def get_cache_ttl(self, task_type: str) -> int:

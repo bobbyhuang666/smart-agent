@@ -60,8 +60,7 @@ class CircuitBreaker:
 
     def record_success(self) -> None:
         with self._lock:
-            if self.state == self.STATE_HALF_OPEN:
-                self.state = self.STATE_CLOSED
+            self.state = self.STATE_CLOSED
             self.failures = 0
             self.open_until = 0.0
             self.half_open_attempts = 0

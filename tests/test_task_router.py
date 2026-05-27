@@ -12,14 +12,10 @@ TaskRouter 核心功能测试
 """
 
 import os
-import sys
 import time
 import json
 import pytest
 import tempfile
-
-# 添加 scripts 目录到 path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from task_router import (
     Task, estimate_complexity, detect_task_type, preprocess_text,
@@ -546,6 +542,274 @@ class TestCacheTTL:
         c.set("test action", "text", {"text": "result"}, ttl_hours=24)
         cached = c.get("test action", "text")
         assert cached is not None
+
+
+# ─── 缓存并发安全 ─────────────────────────────────────────────
+
+class TestCacheConcurrency:
+    """测试缓存的线程安全性"""
+
+    def test_concurrent_set_get(self, tmp_path):
+        """多线程同时读写缓存不应崩溃"""
+        import threading
+        from cache import SemanticCache
+        c = SemanticCache(cache_dir=str(tmp_path), max_entries=100)
+        errors: list[Exception] = []
+
+        def writer(tid: int):
+            try:
+                for i in range(20):
+                    c.set(f"action_{tid}_{i}", f"text_{tid}", {"text": f"result_{tid}_{i}"})
+            except Exception as e:
+                errors.append(e)
+
+        def reader(tid: int):
+            try:
+                for i in range(20):
+                    c.get(f"action_{tid}_{i}", f"text_{tid}")
+            except Exception as e:
+                errors.append(e)
+
+        threads = []
+        for t in range(4):
+            threads.append(threading.Thread(target=writer, args=(t,)))
+            threads.append(threading.Thread(target=reader, args=(t,)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert len(errors) == 0, f"并发错误: {errors}"
+
+    def test_concurrent_set_no_corruption(self, tmp_path):
+        """并发写入后缓存文件可正常读取"""
+        import threading
+        from cache import SemanticCache
+        c = SemanticCache(cache_dir=str(tmp_path), max_entries=50)
+
+        def writer(tid: int):
+            for i in range(15):
+                c.set(f"task_{tid}_{i}", "text", {"text": f"out_{tid}_{i}"})
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # 重新加载应不报错
+        c2 = SemanticCache(cache_dir=str(tmp_path), max_entries=50)
+        assert len(c2._entries) > 0
+
+
+# ─── OpenAI 端点消息解析 ──────────────────────────────────────
+
+class TestOpenAIMessageParsing:
+    """测试 OpenAI 兼容端点的消息解析逻辑"""
+
+    def _parse_messages(self, messages: list[dict]) -> tuple[str, str]:
+        """模拟 api_server 中的消息解析逻辑"""
+        action = ""
+        text = ""
+        system_msg = ""
+        user_messages = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                system_msg = content
+            elif role == "user":
+                user_messages.append(content)
+
+        if system_msg:
+            action = system_msg
+            text = "\n".join(user_messages) if user_messages else ""
+        elif len(user_messages) == 1:
+            content = user_messages[0]
+            for sep in ["：", ":"]:
+                if sep in content:
+                    parts = content.split(sep, 1)
+                    potential_action = parts[0].strip()
+                    if len(potential_action) < 30:
+                        action = potential_action
+                        text = parts[1].strip()
+                        break
+            if not action:
+                action = content
+        else:
+            action = user_messages[0] if user_messages else ""
+            text = "\n".join(user_messages[1:]) if len(user_messages) > 1 else ""
+
+        if not action:
+            action = text
+            text = ""
+        return action, text
+
+    def test_single_user_message(self):
+        action, text = self._parse_messages([{"role": "user", "content": "翻译成中文：Hello world"}])
+        assert action == "翻译成中文"
+        assert text == "Hello world"
+
+    def test_system_plus_user(self):
+        msgs = [
+            {"role": "system", "content": "你是一个翻译助手"},
+            {"role": "user", "content": "Hello world"},
+        ]
+        action, text = self._parse_messages(msgs)
+        assert action == "你是一个翻译助手"
+        assert text == "Hello world"
+
+    def test_multi_turn_takes_last_user(self):
+        msgs = [
+            {"role": "user", "content": "之前的消息"},
+            {"role": "assistant", "content": "回复"},
+            {"role": "user", "content": "翻译这个：Hello"},
+        ]
+        action, text = self._parse_messages(msgs)
+        assert action == "之前的消息"
+        assert "Hello" in text
+
+    def test_single_user_no_colon(self):
+        action, text = self._parse_messages([{"role": "user", "content": "帮我分类这段文本"}])
+        assert action == "帮我分类这段文本"
+
+    def test_chinese_colon(self):
+        action, text = self._parse_messages([{"role": "user", "content": "提取关键词：人工智能的发展"}])
+        assert action == "提取关键词"
+        assert text == "人工智能的发展"
+
+    def test_long_action_no_split(self):
+        """第一部分超过 30 字符时不拆分"""
+        long_prefix = "这是一个非常长的任务描述超过三十个字符限制请勿拆分此部分内容哈"
+        assert len(long_prefix) > 30
+        action, text = self._parse_messages([{"role": "user", "content": f"{long_prefix}：内容"}])
+        assert action == f"{long_prefix}：内容"
+
+    def test_empty_messages(self):
+        action, text = self._parse_messages([])
+        assert action == ""
+
+
+# ─── run_task 集成测试 ─────────────────────────────────────────
+
+class TestRunTaskIntegration:
+    """测试 run_task 核心流程"""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        """每个测试前清空缓存，避免跨测试污染"""
+        from task_router import cache
+        with cache._lock:
+            cache._entries.clear()
+        yield
+        with cache._lock:
+            cache._entries.clear()
+
+    def test_rule_engine_sort_numbers(self):
+        """排序任务走规则引擎"""
+        from task_router import run_task, Task
+        task = Task(action="排序数字", text="5,3,8,1,9,2")
+        result = run_task(task, force_route="local")
+        assert result.output
+        assert result.model_used == "rule_engine"
+
+    def test_rule_engine_dedup(self):
+        """去重任务走规则引擎"""
+        from task_router import run_task, Task
+        task = Task(action="去重", text="苹果,香蕉,苹果,橙子,香蕉")
+        result = run_task(task, force_route="local")
+        assert result.output
+        assert result.model_used == "rule_engine"
+        assert "苹果" in result.output
+
+    def test_rule_engine_count(self):
+        """计数任务走规则引擎"""
+        from task_router import run_task, Task
+        task = Task(action="计数", text="苹果,香蕉,橙子")
+        result = run_task(task, force_route="local")
+        assert result.output
+        assert result.model_used == "rule_engine"
+        assert "3" in result.output
+
+    def test_local_with_mock_ollama(self):
+        """本地任务通过 mock ollama 执行"""
+        from unittest.mock import patch
+        from task_router import run_task, Task
+
+        mock_result = {
+            "text": "这是mock输出",
+            "tokens_input": 10,
+            "tokens_output": 20,
+            "time_ms": 100,
+        }
+        with patch("task_router.call_ollama", return_value=mock_result):
+            task = Task(action="翻译成中文", text="Hello world")
+            result = run_task(task, force_route="local")
+            assert result.output == "这是mock输出"
+            assert result.tokens_input == 10
+
+    def test_cache_hit_on_repeat(self):
+        """重复任务命中缓存"""
+        from unittest.mock import patch
+        from task_router import run_task, Task
+
+        mock_result = {
+            "text": "缓存测试输出",
+            "tokens_input": 5,
+            "tokens_output": 10,
+            "time_ms": 50,
+        }
+        with patch("task_router.call_ollama", return_value=mock_result):
+            task1 = Task(action="缓存测试唯一任务XYZ", text="test content")
+            result1 = run_task(task1, force_route="local")
+            assert result1.model_used != "cache"
+
+            # 再次执行应命中缓存
+            task2 = Task(action="缓存测试唯一任务XYZ", text="test content")
+            result2 = run_task(task2, force_route="local")
+            assert "cache" in result2.route
+
+    def test_estimate_returns_valid(self):
+        """estimate 返回完整结构"""
+        from task_router import estimate
+        result = estimate("翻译成英文")
+        assert "task" in result
+        assert "suggested_route" in result
+        assert "score" in result
+        assert result["suggested_route"] in ("local", "cloud")
+
+    def test_classify_task_returns_type(self):
+        """classify_task 返回任务类型"""
+        from task_router import classify_task
+        result = classify_task("分类这些文本", "苹果\n香蕉\n橙子")
+        assert "task_type" in result
+        assert "verdict" in result
+
+
+# ─── 配置加载 ─────────────────────────────────────────────────
+
+class TestConfigLoading:
+    """测试配置文件加载"""
+
+    def test_from_json(self, tmp_path):
+        from config import RouterConfig
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"local_model": "test-model", "base_threshold": 5.0}')
+        cfg = RouterConfig.from_json(str(config_file))
+        assert cfg.local_model == "test-model"
+        assert cfg.base_threshold == 5.0
+
+    def test_from_json_missing_file(self, tmp_path):
+        from config import RouterConfig
+        cfg = RouterConfig.from_json(str(tmp_path / "nonexistent.json"))
+        assert cfg.local_model == "qwen-tool"  # default
+
+    def test_from_json_invalid(self, tmp_path):
+        from config import RouterConfig
+        config_file = tmp_path / "bad.json"
+        config_file.write_text("not json")
+        cfg = RouterConfig.from_json(str(config_file))
+        assert cfg.local_model == "qwen-tool"  # default
 
 
 # ─── 运行入口 ─────────────────────────────────────────────────
