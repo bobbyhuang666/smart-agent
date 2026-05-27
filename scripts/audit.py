@@ -12,7 +12,6 @@ import os
 import json
 import time
 from dataclasses import dataclass, asdict
-from typing import Optional
 from collections import defaultdict
 
 from config import get_config

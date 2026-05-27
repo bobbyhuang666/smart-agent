@@ -9,7 +9,7 @@ import sys
 import json
 
 from task_router import (
-    Task, run_task, estimate, classify_task, show_usage_stats,
+    Task, run_task, estimate, show_usage_stats,
     decompose_task, execute_plan, get_model_registry, cache, store,
     cap_tracker,
 )
