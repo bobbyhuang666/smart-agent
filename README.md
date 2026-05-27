@@ -370,6 +370,21 @@ docker run -p 8930:8930 -e TASKROUTER_API_KEY=your-secret-key taskrouter
 
 ---
 
+## 开发者指南
+
+```bash
+# 安装 pre-commit hook（每次提交前自动运行 ruff 检查）
+bash scripts/setup-hooks.sh
+
+# 手动运行 ruff 检查
+ruff check scripts/ --select E,F,W --ignore E501,E402,F541
+
+# 自动修复 ruff 错误
+ruff check scripts/ --select E,F,W --ignore E501,E402,F541 --fix
+```
+
+---
+
 ## 联系方式
 
 - Email: huangweijiebobby@gmail.com
