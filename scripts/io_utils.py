@@ -6,12 +6,19 @@ import os
 import json
 
 
+def _ensure_parent_dir(path: str) -> None:
+    """确保父目录存在（安全处理空路径）"""
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+
+
 def read_jsonl(path: str) -> list[dict]:
     """读取 JSONL 文件，跳过损坏行"""
     if not os.path.exists(path):
         return []
     entries = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -24,15 +31,15 @@ def read_jsonl(path: str) -> list[dict]:
 
 def append_jsonl(path: str, entry: dict) -> None:
     """追加单条记录到 JSONL 文件"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as f:
+    _ensure_parent_dir(path)
+    with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def write_jsonl(path: str, entries: list[dict]) -> None:
     """全量重写 JSONL 文件"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    _ensure_parent_dir(path)
+    with open(path, "w", encoding="utf-8") as f:
         for entry in entries:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

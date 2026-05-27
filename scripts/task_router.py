@@ -328,7 +328,7 @@ def _validate_and_fallback(task: Task, result: dict, task_type: str) -> dict:
     if CONFIG.cloud_api_key:
         cloud_result = call_cloud_api(task.action, task.text)
         if cloud_result.get("circuit_open"):
-            task.output += f"\n\n[警告: 本地输出质量不佳，云端熔断中 - {validation['reason']}]"
+            # 熔断中：保留原始本地输出，不追加警告到 output（避免污染缓存）
             task.route = "local(degraded)"
         else:
             auto_collect_on_local_failure(task, task.output, cloud_result["text"], "quality_fallback")
@@ -338,7 +338,8 @@ def _validate_and_fallback(task: Task, result: dict, task_type: str) -> dict:
             result = cloud_result
             task.cost_saved = 0
     else:
-        task.output += f"\n\n[警告: 本地输出质量可能不佳 - {validation['reason']}]"
+        # 无云端 API：保留原始输出，不追加警告（避免污染缓存）
+        pass
 
     return result
 
@@ -354,17 +355,15 @@ def _run_local(task: Task) -> Task:
         subtasks = _recursive_decompose(clean_action, clean_text)
 
     if _run_local_subtasks(task, subtasks, clean_text):
-        cache.set(task.action, task.text,
-                  {"text": task.output, "tokens_input": task.tokens_input, "tokens_output": task.tokens_output})
+        # 不在此处缓存，由 _finalize_task 统一处理（避免未验证输出污染缓存）
         return task
 
     # 单任务
     task_type = detect_task_type(clean_action, PROMPT_TEMPLATES)
     result = _run_local_single(task, clean_action, clean_text)
 
-    # 规则引擎命中时直接返回
+    # 规则引擎命中时直接返回（缓存由 _finalize_task 统一处理）
     if task.model_used == "rule_engine":
-        cache.set(task.action, task.text, {"text": task.output, "tokens_input": 0, "tokens_output": 0})
         return task
 
     # 输出验证 + 云端降级
@@ -442,6 +441,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
     """执行单个任务（核心入口）"""
     # 1. 路由决策（使用可学习权重）
     wt = _get_weight_tracker()
+    routing_score = 0.0
     if force_route:
         task.route = force_route
         task.model_used = CONFIG.local_model if force_route == "local" else CONFIG.cloud_model
@@ -452,6 +452,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
         )
         task.route = decision["route"]
         task.model_used = CONFIG.local_model if decision["route"] == "local" else CONFIG.cloud_model
+        routing_score = decision.get("score", 0.0)
 
     # 2. 语义缓存查找
     cached = _check_cache(task)
@@ -474,7 +475,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
     wt.record_outcome(
         task_type=task_type,
         route=task.route,
-        score=0,  # score 在 decision 中，这里简化
+        score=routing_score,
         success=success,
         local_model=task.model_used,
     )

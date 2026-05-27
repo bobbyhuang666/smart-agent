@@ -4,6 +4,7 @@
 
 import os
 import time
+import threading
 import hashlib
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -76,6 +77,7 @@ class DistillationStore:
         self.pairs_file = os.path.join(self.cache_dir, "distillation.jsonl")
         self.stats_file = os.path.join(self.cache_dir, "distillation_stats.json")
         self.ttl_days = ttl_days or self.DEFAULT_TTL_DAYS
+        self._lock = threading.Lock()
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _load_all(self) -> list[dict]:
@@ -88,11 +90,11 @@ class DistillationStore:
         """检查蒸馏对是否过期"""
         pair_time = pair.get("time", "")
         if not pair_time:
-            return False
+            return True  # 无时间戳视为过期（保守清理）
         try:
             created = time.mktime(time.strptime(pair_time[:19], "%Y-%m-%dT%H:%M:%S"))
         except (ValueError, OverflowError):
-            return False
+            return True  # 时间戳格式错误视为过期
         state = pair.get("epistemic_state", PAIR_HYPOTHESIS)
         if state == PAIR_OUTDATED:
             ttl = self.OUTDATED_TTL_DAYS * 86400
@@ -133,15 +135,16 @@ class DistillationStore:
 
     def update_pair_state(self, pair_id: str, new_state: str,
                           score: Optional[float] = None, reason: str = "") -> None:
-        pairs = self._load_all()
-        for p in pairs:
-            if p.get("pair_id") == pair_id:
-                p["epistemic_state"] = new_state
-                if score is not None:
-                    p["quality_score"] = score
-                if reason:
-                    p["judge_reason"] = reason
-        write_jsonl(self.pairs_file, pairs)
+        with self._lock:
+            pairs = self._load_all()
+            for p in pairs:
+                if p.get("pair_id") == pair_id:
+                    p["epistemic_state"] = new_state
+                    if score is not None:
+                        p["quality_score"] = score
+                    if reason:
+                        p["judge_reason"] = reason
+            write_jsonl(self.pairs_file, pairs)
 
     def get_supported_pairs(self, capability: str, limit: int = 5) -> list[dict]:
         """获取指定能力的已验证训练对（用于 few-shot 注入）"""

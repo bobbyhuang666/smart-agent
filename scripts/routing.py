@@ -231,7 +231,7 @@ def decompose_complex_task(action: str, text: str) -> list[dict]:
 
 
 def _recursive_decompose(action: str, text: str, depth: int = 0, max_depth: int = 3) -> Optional[list[dict]]:
-    """递归拆解复合任务"""
+    """递归拆解复合任务（真正递归：3+ 步任务完整拆解）"""
     if depth >= max_depth:
         return None
 
@@ -240,15 +240,40 @@ def _recursive_decompose(action: str, text: str, depth: int = 0, max_depth: int 
         if conn in action:
             parts = action.split(conn, 1)
             if len(parts) == 2 and len(parts[0].strip()) > 2 and len(parts[1].strip()) > 2:
-                return [
-                    {"action": parts[0].strip(), "text": text, "depth": depth},
-                    {"action": parts[1].strip(), "text": text, "depth": depth},
-                ]
+                left = parts[0].strip()
+                right = parts[1].strip()
+                result = []
+
+                # 递归拆解左侧子任务
+                left_sub = _recursive_decompose(left, text, depth + 1, max_depth)
+                if left_sub:
+                    result.extend(left_sub)
+                else:
+                    result.append({"action": left, "text": text, "depth": depth})
+
+                # 递归拆解右侧子任务
+                right_sub = _recursive_decompose(right, text, depth + 1, max_depth)
+                if right_sub:
+                    result.extend(right_sub)
+                else:
+                    result.append({"action": right, "text": text, "depth": depth})
+
+                return result
 
     # 逗号分隔的多个动作
     if "，" in action or "," in action:
         parts = re.split(r"[，,]", action)
         if len(parts) >= 2 and all(len(p.strip()) > 2 for p in parts):
-            return [{"action": p.strip(), "text": text, "depth": depth} for p in parts if p.strip()]
+            result = []
+            for p in parts:
+                p = p.strip()
+                if not p:
+                    continue
+                sub = _recursive_decompose(p, text, depth + 1, max_depth)
+                if sub:
+                    result.extend(sub)
+                else:
+                    result.append({"action": p, "text": text, "depth": depth})
+            return result if result else None
 
     return None
