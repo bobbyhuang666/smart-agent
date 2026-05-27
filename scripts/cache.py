@@ -120,7 +120,7 @@ class SemanticCache:
             return best_match
 
     def set(self, action: str, text: str, result: dict, ttl_hours: int = 48) -> None:
-        """写入缓存（线程安全，追加写入）"""
+        """写入缓存（线程安全，I/O 在锁内保证一致性）"""
         key = self._make_key(action, text)
         combined = f"{action}|{text}"
 
@@ -141,15 +141,11 @@ class SemanticCache:
             self._entries.append(entry)
 
             # 淘汰旧条目
-            need_compact = len(self._entries) > self.max_entries
-            if need_compact:
+            if len(self._entries) > self.max_entries:
                 self._entries = self._entries[-self.max_entries:]
-
-        # 写入磁盘（锁外执行，减少锁持有时间）
-        if need_compact:
-            self._save()  # 淘汰后全量重写
-        else:
-            self._append_entry(entry)  # 追加写入
+                self._save()  # 淘汰后全量重写
+            else:
+                self._append_entry(entry)  # 追加写入
 
     def cleanup_expired(self) -> int:
         """清理过期条目（线程安全）"""

@@ -8,9 +8,9 @@ from typing import Any, Optional
 
 from config import get_config
 
-# 延迟加载的隐私过滤器单例（线程安全）
-_privacy_filter_instance = None
-_privacy_filter_lock = threading.Lock()
+# 延迟加载的单例（线程安全）
+_model_registry_instance = None
+_model_registry_lock = threading.Lock()
 
 
 # ─── 熔断器（线程安全）─────────────────────────────────────────
@@ -61,6 +61,23 @@ class CircuitBreaker:
 circuit_breaker = CircuitBreaker()
 
 
+def _get_model_registry() -> Any:
+    """延迟加载模型注册表（线程安全单例）"""
+    global _model_registry_instance
+    if _model_registry_instance is not None:
+        return _model_registry_instance
+    with _model_registry_lock:
+        if _model_registry_instance is not None:
+            return _model_registry_instance
+        try:
+            from model_registry import ModelRegistry
+            config = get_config()
+            _model_registry_instance = ModelRegistry(cache_dir=config.cache_dir)
+        except ImportError:
+            pass
+    return _model_registry_instance
+
+
 # ─── Ollama 调用 ──────────────────────────────────────────────
 
 def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[int] = None) -> dict[str, Any]:
@@ -94,24 +111,18 @@ def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[i
         }
 
         # 更新模型统计
-        try:
-            from model_registry import ModelRegistry
-            registry = ModelRegistry(cache_dir=config.cache_dir)
+        registry = _get_model_registry()
+        if registry:
             registry.update_after_call(
                 model, success=True, latency_ms=elapsed,
                 tokens_in=result["tokens_input"], tokens_out=result["tokens_output"]
             )
-        except Exception:
-            pass
 
         return result
     except Exception as e:
-        try:
-            from model_registry import ModelRegistry
-            registry = ModelRegistry(cache_dir=config.cache_dir)
+        registry = _get_model_registry()
+        if registry:
             registry.update_after_call(model, success=False, latency_ms=0)
-        except Exception:
-            pass
         raise
 
 
@@ -205,17 +216,9 @@ def call_cloud_api(prompt: str, text: str = "") -> dict[str, Any]:
 
 
 def _get_privacy_filter() -> Any:
-    """延迟加载隐私过滤器（线程安全单例）"""
-    global _privacy_filter_instance
-    if _privacy_filter_instance is not None:
-        return _privacy_filter_instance
-    with _privacy_filter_lock:
-        # 双重检查锁定
-        if _privacy_filter_instance is not None:
-            return _privacy_filter_instance
-        try:
-            from privacy import PrivacyFilter
-            _privacy_filter_instance = PrivacyFilter()
-        except ImportError:
-            pass
-    return _privacy_filter_instance
+    """获取全局 PrivacyFilter 单例（委托给 privacy 模块）"""
+    try:
+        from privacy import get_privacy_filter as _get_pf
+        return _get_pf()
+    except ImportError:
+        return None

@@ -245,29 +245,47 @@ class TaskRouterHandler:
             }, status=400)
 
         # 从 messages 中提取 action 和 text
+        # 支持多种格式：
+        # 1. 单条 user 消息: "翻译成中文：Hello" 或 "帮我翻译 Hello"
+        # 2. system + user: system 作为任务指令，user 作为内容
+        # 3. 多轮对话: 取 system + 最后一条 user 消息
         action = ""
         text = ""
+        system_msg = ""
+        user_messages = []
 
-        if len(messages) == 1:
-            content = messages[0].get("content", "")
-            if "：" in content:
-                parts = content.split("：", 1)
-                action = parts[0].strip()
-                text = parts[1].strip()
-            elif ":" in content:
-                parts = content.split(":", 1)
-                action = parts[0].strip()
-                text = parts[1].strip()
-            else:
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                system_msg = content
+            elif role == "user":
+                user_messages.append(content)
+
+        if system_msg:
+            # 有 system 消息时，system 作为 action，user 作为 text
+            action = system_msg
+            text = "\n".join(user_messages) if user_messages else ""
+        elif len(user_messages) == 1:
+            # 单条 user 消息，尝试分离 action 和 text
+            content = user_messages[0]
+            # 尝试用冒号分隔
+            for sep in ["：", ":"]:
+                if sep in content:
+                    parts = content.split(sep, 1)
+                    # 检查第一部分是否像任务指令（短且包含动词）
+                    potential_action = parts[0].strip()
+                    if len(potential_action) < 30:
+                        action = potential_action
+                        text = parts[1].strip()
+                        break
+            if not action:
+                # 无法分隔，整个内容作为 action
                 action = content
         else:
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "system":
-                    action = content
-                elif role == "user":
-                    text = content if not action else text + " " + content
+            # 多条 user 消息，取最后一条作为 text
+            action = user_messages[0] if user_messages else ""
+            text = "\n".join(user_messages[1:]) if len(user_messages) > 1 else ""
 
         if not action:
             action = text
@@ -282,7 +300,7 @@ class TaskRouterHandler:
             "id": f"chatcmpl-{int(time.time()*1000)}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": body.get("model", "task-router"),
+            "model": body.get("model", result.model_used or "task-router"),
             "choices": [{
                 "index": 0,
                 "message": {

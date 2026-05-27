@@ -286,6 +286,26 @@ class PrivacyConfig:
             json.dump(dataclasses.asdict(self), f, ensure_ascii=False, indent=2)
 
 
+# ─── 模块级单例（线程安全）──────────────────────────────────────
+
+import threading
+
+_privacy_filter_instance: Optional[PrivacyFilter] = None
+_privacy_filter_lock = threading.Lock()
+
+
+def get_privacy_filter() -> Optional[PrivacyFilter]:
+    """获取全局 PrivacyFilter 单例（线程安全）"""
+    global _privacy_filter_instance
+    if _privacy_filter_instance is not None:
+        return _privacy_filter_instance
+    with _privacy_filter_lock:
+        if _privacy_filter_instance is not None:
+            return _privacy_filter_instance
+        _privacy_filter_instance = PrivacyFilter()
+    return _privacy_filter_instance
+
+
 if __name__ == "__main__":
     # 测试
     filter = PrivacyFilter()

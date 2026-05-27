@@ -49,7 +49,6 @@ store = DistillationStore(cache_dir=CONFIG.cache_dir)
 
 # 模型注册表（延迟加载）
 _model_registry = None
-_privacy_filter = None
 _cap_tracker = None
 _log_lock = threading.Lock()
 
@@ -69,14 +68,12 @@ def get_model_registry() -> Any:
 
 
 def get_privacy_filter() -> Any:
-    global _privacy_filter
-    if _privacy_filter is None:
-        try:
-            from privacy import PrivacyFilter
-            _privacy_filter = PrivacyFilter()
-        except ImportError:
-            pass
-    return _privacy_filter
+    """获取全局 PrivacyFilter 单例（委托给 privacy 模块）"""
+    try:
+        from privacy import get_privacy_filter as _get_pf
+        return _get_pf()
+    except ImportError:
+        return None
 
 
 class CapabilityTracker:
