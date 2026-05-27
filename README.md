@@ -1,6 +1,8 @@
-# TaskRouter 🧠
+# TaskRouter
 
-**智能任务路由系统：将大任务拆解为子任务，简单子任务走本地免费模型(Qwen2.5 1.5B)，复杂的走云端 API(DeepSeek/Claude/OpenAI)，最大限度节约 token 成本。**
+**智能任务路由系统：自动选择最佳本地模型，将简单任务路由到免费本地模型，复杂任务路由到云端 API，最大限度节约 token 成本。**
+
+支持多种本地模型（Qwen、Llama、Mistral、Phi、Gemma 等），自动发现已安装模型并按任务类型智能选择最佳模型。
 
 ## 核心思想
 
@@ -9,7 +11,7 @@
 ```
 用户: "分析电商销售数据并出报告"
                                   ┌───────────────────┐
-拆解 →  ① 清洗数据    → LOCAL     │ Qwen2.5 1.5B (免费)│
+拆解 →  ① 清洗数据    → LOCAL     │ Qwen-tool (免费)  │
         ② 分类商品    → LOCAL     │ 3/5 = 60% 任务   │
         ③ 统计销量    → LOCAL     │ 0 成本           │
                                   ├───────────────────┤
@@ -25,6 +27,7 @@
 ## 目录
 
 - [快速开始](#快速开始)
+- [API 服务](#api-服务)
 - [工作流程](#工作流程)
 - [拆解大任务](#拆解大任务)
 - [命令参考](#命令参考)
@@ -40,7 +43,7 @@
 ```bash
 # 1. 安装依赖
 pip3 install requests
-ollama pull qwen2.5:1.5b
+ollama pull qwen-tool      # 推荐：支持工具调用的 Qwen 模型
 
 # 2. 设置别名
 alias sma="python3 /path/to/task-router/scripts/task_router.py"
@@ -51,6 +54,50 @@ sma --task "翻译成中文" --text "Hello World"
 
 sma --stats
 # 查看累计节约金额
+
+# 4. 查看可用模型
+sma --models
+# 自动发现 Ollama 已安装模型，按能力评分排序
+```
+
+## API 服务
+
+启动 Web 仪表盘和 REST API：
+
+```bash
+# 启动服务器（默认端口 8930）
+bash start_server.sh
+
+# 或直接运行
+python3 scripts/api_server.py --port 8930
+```
+
+API 端点：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/task | 执行单个任务 |
+| POST | /api/estimate | 预估路由 |
+| POST | /api/decompose | 拆解复杂任务 |
+| POST | /api/batch | 批量处理（支持并发） |
+| GET | /api/stats | 使用统计 |
+| GET | /api/models | 模型列表 |
+| GET | /api/health | 健康检查 |
+| GET | /api/history | 任务历史 |
+| GET | / | Web 仪表盘 |
+
+示例：
+
+```bash
+# 执行任务
+curl -X POST http://localhost:8930/api/task \
+  -H "Content-Type: application/json" \
+  -d '{"action":"翻译成中文","text":"Hello world"}'
+
+# 批量处理（并发=3）
+curl -X POST http://localhost:8930/api/batch \
+  -H "Content-Type: application/json" \
+  -d '{"tasks":[{"action":"翻译成中文","text":"Hello"},{"action":"判断情感","text":"很好"}],"concurrency":3}'
 ```
 
 ---
@@ -163,22 +210,42 @@ sma --decompose "提取关键词、分类内容、分析趋势、生成报告"
 |------|------|
 | `sma -i` | 交互模式（逐条输入任务） |
 | `sma --batch tasks.json` | 批量执行多个任务 |
-| `sma --stats` | 查看累计节约金额（含缓存统计） |
+| `sma --batch tasks.json --concurrency 3` | 并发批量执行 |
+| `sma --stats` | 查看累计节约金额（含缓存统计、每日统计） |
+| `sma --models` | 查看模型注册表（自动发现已安装模型） |
+| `sma --benchmark [model]` | 运行模型基准测试 |
+
+### 模型管理
+
+```bash
+# 查看已安装模型及能力评分
+sma --models
+
+# 运行基准测试评估模型能力
+sma --benchmark qwen-tool:latest
+sma --benchmark qwen-tool-3b:latest
+
+# 质量评估
+python3 scripts/quality_eval.py --eval qwen-tool:latest
+python3 scripts/quality_eval.py --ab qwen-tool:latest qwen-tool-3b:latest
+```
 
 ---
 
-## Qwen2.5 1.5B 能力边界
+## 本地模型能力边界
+
+系统自动选择最佳本地模型。以下是典型能力范围：
 
 ### ✅ 可以委托（准确率 85-95%）
 
-| 类型 | 示例 | 耗时 |
-|------|------|------|
-| 文本分类/打标签 | 情感正负面判断 | ~0.3s |
-| 文件分类整理 | 按扩展名归类 | ~1.5s |
-| 格式转换 | CSV→JSON | ~0.5s |
-| 关键词提取 | 抽人名、日期 | ~0.8s |
-| 中英翻译 | 短句互译 | ~0.5s |
-| 简短概括 | <200 字总结 | ~0.8s |
+| 类型 | 示例 | 1.5B | 3B |
+|------|------|------|-----|
+| 文本分类/打标签 | 情感正负面判断 | ~90% | ~95% |
+| 文件分类整理 | 按扩展名归类 | ~85% | ~92% |
+| 格式转换 | CSV→JSON | ~90% | ~95% |
+| 关键词提取 | 抽人名、日期 | ~85% | ~92% |
+| 中英翻译 | 短句互译 | ~90% | ~92% |
+| 简短概括 | <200 字总结 | ~80% | ~88% |
 
 ### ⚠️ 勉强可用（准确率 60-80%，输出不稳定）
 

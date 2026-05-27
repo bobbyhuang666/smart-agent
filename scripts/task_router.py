@@ -14,6 +14,21 @@ import random
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 
+# 模型注册表（延迟加载）
+_model_registry = None
+
+def get_model_registry():
+    global _model_registry
+    if _model_registry is None:
+        from model_registry import ModelRegistry
+        _model_registry = ModelRegistry(
+            cache_dir=CONFIG.get("cache_dir", os.path.expanduser("~/.cache/task_router"))
+        )
+        # 首次使用时自动发现
+        if not _model_registry.models:
+            _model_registry.discover()
+    return _model_registry
+
 # ─── 配置 ───────────────────────────────────────────────────────────
 
 CONFIG = {
@@ -1120,25 +1135,44 @@ def call_ollama(prompt: str, model: str = None, max_tokens: int = None) -> dict:
     model = model or CONFIG["local_model"]
     max_tokens = max_tokens or CONFIG["local_max_tokens"]
     start = time.time()
-    resp = requests.post(
-        f"{CONFIG['ollama_base']}/api/generate",
-        json={
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"num_predict": max_tokens},
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    elapsed = int((time.time() - start) * 1000)
-    return {
-        "text": data["response"].strip(),
-        "tokens_input": data.get("prompt_eval_count", 0),
-        "tokens_output": data.get("eval_count", 0),
-        "time_ms": elapsed,
-    }
+    try:
+        resp = requests.post(
+            f"{CONFIG['ollama_base']}/api/generate",
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": max_tokens},
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        elapsed = int((time.time() - start) * 1000)
+        result = {
+            "text": data["response"].strip(),
+            "tokens_input": data.get("prompt_eval_count", 0),
+            "tokens_output": data.get("eval_count", 0),
+            "time_ms": elapsed,
+        }
+        # 更新模型统计
+        try:
+            registry = get_model_registry()
+            registry.update_after_call(
+                model, success=True, latency_ms=elapsed,
+                tokens_in=result["tokens_input"], tokens_out=result["tokens_output"]
+            )
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        # 记录失败
+        try:
+            registry = get_model_registry()
+            registry.update_after_call(model, success=False, latency_ms=0)
+        except Exception:
+            pass
+        raise
 
 
 # ─── 云端后端 ───────────────────────────────────────────────────────
@@ -2319,6 +2353,20 @@ def run_task(task: Task, force_route: str = "") -> Task:
 
         # 2. 单任务：检测类型 + 优化 prompt
         task_type = detect_task_type(clean_action)
+
+        # 智能模型选择：根据任务类型选择最佳本地模型
+        selected_model = None
+        try:
+            registry = get_model_registry()
+            if registry.models:
+                capability = TASK_TO_CAPABILITY.get(task_type, "")
+                if capability:
+                    best = registry.select_best(capability, prefer_speed=True)
+                    if best and best.name != CONFIG["local_model"]:
+                        selected_model = best.name
+        except Exception:
+            pass
+
         prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
         # 动态 few-shot 增强
         if task_type:
@@ -2328,8 +2376,9 @@ def run_task(task: Task, force_route: str = "") -> Task:
         # 提示压缩（减少 token 消耗）
         prompt = compress_prompt_tokens(prompt, task_type)
         max_tokens = get_max_tokens(task_type)
-        result = call_ollama(prompt, max_tokens=max_tokens)
+        result = call_ollama(prompt, model=selected_model, max_tokens=max_tokens)
         task.output = postprocess_output(result["text"], task_type)
+        task.model_used = selected_model or CONFIG["local_model"]
 
         # ── 输出验证 + 云端降级 ──
         validation = validate_local_output(task.output, task_type)
@@ -2414,9 +2463,20 @@ def run_task(task: Task, force_route: str = "") -> Task:
     return task
 
 
-def run_batch(tasks_data: list[dict]) -> list[Task]:
-    results = []
-    for i, t in enumerate(tasks_data):
+def run_batch(tasks_data: list[dict], concurrency: int = 1) -> list[Task]:
+    """
+    批量执行任务。
+
+    参数:
+        tasks_data: 任务列表，每个元素为 dict
+        concurrency: 并发数 (1=串行, >1=并行)
+
+    返回:
+        Task 结果列表
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _run_one(t):
         task = Task(
             action=t.get("action", ""),
             text=t.get("text", ""),
@@ -2427,12 +2487,39 @@ def run_batch(tasks_data: list[dict]) -> list[Task]:
         except Exception as e:
             task.output = f"[错误] {e}"
             task.route = "error"
-        results.append(task)
-        status = "✓" if task.route != "error" else "✗"
-        print(
-            f"  [{i+1}/{len(tasks_data)}] {status} {task.action[:50]} → {task.route} ({task.time_ms}ms)"
-        )
-    return results
+        return task
+
+    if concurrency <= 1:
+        # 串行执行
+        results = []
+        for i, t in enumerate(tasks_data):
+            task = _run_one(t)
+            results.append(task)
+            status = "✓" if task.route != "error" else "✗"
+            print(
+                f"  [{i+1}/{len(tasks_data)}] {status} {task.action[:50]} → {task.route} ({task.time_ms}ms)"
+            )
+        return results
+    else:
+        # 并行执行
+        results = [None] * len(tasks_data)
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_idx = {
+                executor.submit(_run_one, t): i
+                for i, t in enumerate(tasks_data)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    task = future.result()
+                except Exception as e:
+                    task = Task(action=tasks_data[idx].get("action", ""), output=f"[错误] {e}", route="error")
+                results[idx] = task
+                status = "✓" if task.route != "error" else "✗"
+                print(
+                    f"  [{idx+1}/{len(tasks_data)}] {status} {task.action[:50]} → {task.route} ({task.time_ms}ms)"
+                )
+        return results
 
 
 def interactive_mode():
@@ -2936,6 +3023,7 @@ def main():
     parser.add_argument("--file", "-f", action="append", help="待处理的文件路径")
     parser.add_argument("--force", choices=["local", "cloud"], help="强制路由")
     parser.add_argument("--batch", "-b", help="批量任务 JSON 文件路径")
+    parser.add_argument("--concurrency", type=int, default=1, help="批量任务并发数 (默认1=串行)")
     parser.add_argument("--interactive", "-i", action="store_true", help="交互模式")
     parser.add_argument("--estimate", "-e", help="预估算任务路由")
     parser.add_argument("--classify", "-c", nargs="*", help="细粒度分类分析任务是否适 Qwen2.5 1.5B")
@@ -2947,10 +3035,31 @@ def main():
     parser.add_argument("--distill-stats", action="store_true", help="查看蒸馏系统健康状态")
     parser.add_argument("--distill-export", nargs="?", const="auto", help="导出可训练数据为 JSONL")
     parser.add_argument("--thresholds", action="store_true", help="查看自适应阈值调整情况")
+    parser.add_argument("--models", action="store_true", help="查看模型注册表")
+    parser.add_argument("--benchmark", nargs="?", const="all", help="运行模型基准测试")
     args = parser.parse_args()
 
     if args.stats:
         print(show_usage_stats())
+        return
+
+    if args.models:
+        registry = get_model_registry()
+        registry.discover()
+        print(registry.get_summary())
+        return
+
+    if args.benchmark:
+        registry = get_model_registry()
+        registry.discover()
+        model = None if args.benchmark == "all" else args.benchmark
+        results = registry.run_benchmark(model)
+        for m, r in results.items():
+            print(f"\n{m}:")
+            for cap, score in r["capabilities"].items():
+                bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
+                print(f"  {cap:15} {bar} {score:.0%}")
+            print(f"  平均延迟: {r['avg_latency_ms']}ms")
         return
 
     if args.estimate:
@@ -3073,7 +3182,7 @@ def main():
     if args.batch:
         with open(args.batch) as f:
             tasks_data = json.load(f)
-        results = run_batch(tasks_data)
+        results = run_batch(tasks_data, concurrency=args.concurrency)
         if args.json:
             print(json.dumps([asdict(t) for t in results], ensure_ascii=False, indent=2))
         else:
