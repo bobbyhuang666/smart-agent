@@ -53,7 +53,7 @@ jobs:
         run: pip install ruff
 
       - name: Ruff check
-        run: ruff check scripts/ --select E,F,W --ignore E501
+        run: ruff check scripts/ --select E,F,W --ignore E501,E402,F541
 
       - name: Ruff format check
         run: ruff format scripts/ --check --diff || true

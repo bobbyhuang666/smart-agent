@@ -19,11 +19,8 @@ import json
 import time
 import hmac
 import asyncio
-import logging
 from datetime import datetime
-from typing import Any
 
-import aiohttp
 from aiohttp import web
 
 # 添加 scripts 目录到 path
@@ -33,11 +30,11 @@ from logger import setup_logging
 log = setup_logging()
 
 from task_router import (
-    run_task, Task, estimate, classify_task, show_usage_stats,
+    run_task, Task, estimate, show_usage_stats,
     decompose_complex_task, CONFIG, cache,
     get_model_registry, run_batch,
 )
-from audit import get_audit_logger, get_quota_manager
+from audit import get_audit_logger
 
 # API 认证密钥（环境变量设置，为空则不启用认证）
 API_KEY = os.environ.get("TASKROUTER_API_KEY", "")
