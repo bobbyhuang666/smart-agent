@@ -786,6 +786,37 @@ class TestRunTaskIntegration:
         assert "verdict" in result
 
 
+# ─── 统计与阈值 ───────────────────────────────────────────────
+
+class TestStatsAndThresholds:
+    """测试 show_usage_stats 和 CapabilityTracker（回归 read_jsonl 导入）"""
+
+    def test_show_usage_stats_no_crash(self):
+        """show_usage_stats 不应因缺少导入而崩溃"""
+        from task_router import show_usage_stats
+        result = show_usage_stats()
+        assert isinstance(result, str)
+
+    def test_capability_tracker_record_and_rate(self, tmp_path):
+        """CapabilityTracker 记录和成功率计算"""
+        from task_router import CapabilityTracker
+        tracker = CapabilityTracker(cache_dir=str(tmp_path))
+        tracker.record("classification", success=True)
+        tracker.record("classification", success=True)
+        tracker.record("classification", success=False)
+        rate = tracker.get_success_rate("classification")
+        assert rate == pytest.approx(2 / 3)
+
+    def test_capability_tracker_get_all_adjustments(self, tmp_path):
+        """get_all_adjustments 使用 read_jsonl，不应崩溃"""
+        from task_router import CapabilityTracker
+        tracker = CapabilityTracker(cache_dir=str(tmp_path))
+        tracker.record("translation", success=True, task_type="translate_en2zh")
+        result = tracker.get_all_adjustments()
+        assert "translation" in result
+        assert "success_rate" in result["translation"]
+
+
 # ─── 配置加载 ─────────────────────────────────────────────────
 
 class TestConfigLoading:
