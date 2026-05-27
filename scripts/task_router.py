@@ -33,7 +33,7 @@ from distillation import (
     DistillationStore, DistillationPair, collect_distillation_pair,
     get_dynamic_examples,
 )
-from io_utils import append_jsonl
+from io_utils import read_jsonl, append_jsonl
 
 # ─── 全局实例（延迟初始化）──────────────────────────────────────
 
