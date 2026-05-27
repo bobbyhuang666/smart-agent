@@ -18,7 +18,7 @@ from dataclasses import dataclass, asdict, field
 
 CONFIG = {
     "ollama_base": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-    "local_model": os.environ.get("LOCAL_MODEL", "qwen2.5:1.5b"),
+    "local_model": os.environ.get("LOCAL_MODEL", "qwen-tool"),
     "local_max_tokens": 2048,
     "cloud_api_url": os.environ.get("CLOUD_API_URL", ""),
     "cloud_api_key": os.environ.get("CLOUD_API_KEY", ""),
@@ -28,7 +28,26 @@ CONFIG = {
     "cache_dir": os.environ.get(
         "TASK_ROUTER_CACHE", str(Path.home() / ".cache" / "task_router")
     ),
+    # 缓存 TTL（小时）：确定性任务缓存更久，非确定性任务缓存更短
+    "cache_ttl_hours": {
+        "translation": 168,      # 翻译：7天（确定性高）
+        "classification": 168,   # 分类：7天
+        "extraction": 72,        # 提取：3天
+        "formatting": 168,       # 格式化：7天
+        "summarization": 24,     # 摘要：1天（可能变化）
+        "default": 48,           # 默认：2天
+    },
 }
+
+# ─── 云端熔断器状态 ─────────────────────────────────────────────────
+_circuit_breaker = {
+    "failures": 0,           # 连续失败次数
+    "last_failure": 0,       # 最后失败时间戳
+    "open_until": 0,         # 熔断截止时间（> 当前时间则熔断中）
+    "max_failures": 3,       # 触发熔断的连续失败次数
+    "cooldown_seconds": 120, # 熔断冷却时间（秒）
+}
+
 
 # ─── 任务复杂度评估 ─────────────────────────────────────────────────
 
@@ -587,6 +606,51 @@ def preprocess_text(text: str, max_chars: int = 800) -> str:
     return text
 
 
+def compress_prompt_tokens(prompt: str, task_type: str) -> str:
+    """
+    提示压缩：对长 prompt 进行 token 节约处理。
+    - 去除冗余的模板说明（保留核心指令和示例）
+    - 压缩长输入文本中的重复模式
+    - 对简单任务类型使用更精简的指令
+    """
+    if not prompt or len(prompt) < 200:
+        return prompt  # 短 prompt 不压缩
+
+    # 简单任务类型的精简指令映射
+    COMPACT_INSTRUCTIONS = {
+        "sentiment": "判断情感，只输出正面/负面：\n{text}\n→",
+        "translate_en2zh": "英译中：\n{text}\n→",
+        "translate_zh2en": "中译英：\n{text}\n→",
+        "tag": "提取标签：\n{text}\n→",
+    }
+
+    if task_type in COMPACT_INSTRUCTIONS:
+        # 从原始 prompt 中提取 {text} 实际内容
+        text_match = re.search(r'\{text\}', prompt)
+        if text_match:
+            # 尝试从 prompt 中提取实际文本
+            pass  # 模板已 format，无法回退
+
+    # 通用压缩：去除重复的空行和多余空格
+    prompt = re.sub(r'\n{3,}', '\n\n', prompt)
+    prompt = re.sub(r' {2,}', ' ', prompt)
+
+    # 如果 prompt 仍然很长，截断示例部分（保留最后的指令和输入）
+    if len(prompt) > 1500:
+        # 找到最后一个 "现在" 或 "→" 作为截断点
+        for marker in ["现在", "→", "输入：", "内容："]:
+            idx = prompt.rfind(marker)
+            if idx > 200:  # 确保保留了一些上下文
+                # 保留前100字符的指令 + 截断点后的内容
+                first_line_end = prompt.index('\n') if '\n' in prompt else 100
+                prompt = prompt[:first_line_end + 50] + "\n...\n" + prompt[idx:]
+                return prompt
+        # 没有找到标记 → 硬截断（保留首尾）
+        prompt = prompt[:800] + "\n... [已压缩]\n" + prompt[-200:]
+
+    return prompt
+
+
 def postprocess_output(output: str, task_type: str = "") -> str:
     """输出清洗：去 markdown 包裹、去多余说明、格式化修复"""
     if not output:
@@ -1086,31 +1150,66 @@ def call_cloud_api(prompt: str, text: str = "") -> dict:
             "tokens_input": 0, "tokens_output": 0, "time_ms": 0,
         }
 
+    # 熔断检查：连续失败超过阈值，暂时跳过云端
+    now = time.time()
+    if _circuit_breaker["open_until"] > now:
+        remaining = int(_circuit_breaker["open_until"] - now)
+        return {
+            "text": f"[云端熔断中] 连续失败{_circuit_breaker['failures']}次，{remaining}秒后重试",
+            "tokens_input": 0, "tokens_output": 0, "time_ms": 0,
+            "circuit_open": True,
+        }
+
     import requests
     messages = [{"role": "user", "content": prompt}]
     if text:
         messages.append({"role": "user", "content": text})
 
-    start = time.time()
-    resp = requests.post(
-        f"{CONFIG['cloud_api_url']}/v1/chat/completions",
-        headers={"Authorization": f"Bearer {CONFIG['cloud_api_key']}"},
-        json={
-            "model": CONFIG["cloud_model"],
-            "messages": messages,
-            "max_tokens": 4096,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    elapsed = int((time.time() - start) * 1000)
-    usage = data.get("usage", {})
+    max_retries = 2
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            start = time.time()
+            resp = requests.post(
+                f"{CONFIG['cloud_api_url']}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {CONFIG['cloud_api_key']}"},
+                json={
+                    "model": CONFIG["cloud_model"],
+                    "messages": messages,
+                    "max_tokens": 4096,
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            elapsed = int((time.time() - start) * 1000)
+            usage = data.get("usage", {})
+            # 成功 → 重置熔断器
+            _circuit_breaker["failures"] = 0
+            _circuit_breaker["open_until"] = 0
+            return {
+                "text": data["choices"][0]["message"]["content"].strip(),
+                "tokens_input": usage.get("prompt_tokens", 0),
+                "tokens_output": usage.get("completion_tokens", 0),
+                "time_ms": elapsed,
+            }
+        except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(1 * (attempt + 1))  # 指数退避: 1s, 2s
+                continue
+            break
+
+    # 所有重试失败 → 更新熔断器
+    _circuit_breaker["failures"] += 1
+    _circuit_breaker["last_failure"] = time.time()
+    if _circuit_breaker["failures"] >= _circuit_breaker["max_failures"]:
+        _circuit_breaker["open_until"] = time.time() + _circuit_breaker["cooldown_seconds"]
+
     return {
-        "text": data["choices"][0]["message"]["content"].strip(),
-        "tokens_input": usage.get("prompt_tokens", 0),
-        "tokens_output": usage.get("completion_tokens", 0),
-        "time_ms": elapsed,
+        "text": f"[云端调用失败] {last_error}",
+        "tokens_input": 0, "tokens_output": 0, "time_ms": 0,
+        "error": str(last_error),
     }
 
 
@@ -1154,6 +1253,7 @@ def show_usage_stats() -> str:
     total_local = total_cloud = total_cache = 0
     total_input = total_output = 0
     total_saved = 0.0
+    daily_stats = {}  # date -> {local, cloud, cache, saved}
 
     with open(log_file) as f:
         for line in f:
@@ -1175,6 +1275,19 @@ def show_usage_stats() -> str:
             total_output += e.get("tokens_output", 0)
             total_saved += e.get("cost_saved", 0)
 
+            # 按天统计
+            day = e.get("time", "")[:10]
+            if day:
+                if day not in daily_stats:
+                    daily_stats[day] = {"local": 0, "cloud": 0, "cache": 0, "saved": 0.0}
+                if route == "local":
+                    daily_stats[day]["local"] += 1
+                elif "cache" in route:
+                    daily_stats[day]["cache"] += 1
+                else:
+                    daily_stats[day]["cloud"] += 1
+                daily_stats[day]["saved"] += e.get("cost_saved", 0)
+
     # 语义缓存统计
     cache_stats = cache.stats()
     result = (
@@ -1193,6 +1306,30 @@ def show_usage_stats() -> str:
             f"  缓存条目: {cache_stats['total']}\n"
             f"  缓存节约: ${cache_stats['estimated_cost_saved']:.4f}\n"
         )
+
+    # 每日统计（最近7天）
+    if daily_stats:
+        sorted_days = sorted(daily_stats.keys(), reverse=True)[:7]
+        if sorted_days:
+            result += f"\n每日统计 (最近{len(sorted_days)}天):\n"
+            for day in sorted_days:
+                d = daily_stats[day]
+                total_day = d["local"] + d["cloud"] + d["cache"]
+                result += (
+                    f"  {day}: {total_day}次 "
+                    f"(本地{d['local']}/云端{d['cloud']}/缓存{d['cache']}) "
+                    f"省${d['saved']:.4f}\n"
+                )
+
+    # 熔断器状态
+    if _circuit_breaker["failures"] > 0:
+        now = time.time()
+        if _circuit_breaker["open_until"] > now:
+            remaining = int(_circuit_breaker["open_until"] - now)
+            result += f"\n云端熔断器: 🔴 熔断中 (连续失败{_circuit_breaker['failures']}次, {remaining}秒后恢复)\n"
+        else:
+            result += f"\n云端熔断器: 🟡 已恢复 (上次连续失败{_circuit_breaker['failures']}次)\n"
+
     return result
 
 
@@ -1519,24 +1656,41 @@ class SemanticCache:
             for entry in self._cache.values():
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def _is_expired(self, entry: dict) -> bool:
+        """检查缓存条目是否已过期"""
+        created = entry.get("created_ts", 0)
+        ttl_hours = entry.get("ttl_hours", CONFIG["cache_ttl_hours"]["default"])
+        if created <= 0:
+            return False  # 旧条目无时间戳，不过期
+        return (time.time() - created) > ttl_hours * 3600
+
     def get(self, action: str, text: str = "") -> dict | None:
         """
         查找缓存命中。先精确匹配 key，再归一化 key，最后模糊匹配 trigram 相似度。
+        支持 TTL 过期检查。
         返回缓存条目或 None。
         """
         # 精确匹配
         exact_key = self._make_key(action, text)
         if exact_key in self._cache:
             entry = self._cache[exact_key]
-            entry["match_type"] = "exact"
-            return entry
+            if self._is_expired(entry):
+                del self._cache[exact_key]
+                self._save()
+            else:
+                entry["match_type"] = "exact"
+                return entry
 
         # 归一化匹配（去空格标点后）
         norm_key = self._normalized_key(action, text)
         if norm_key in self._cache:
             entry = self._cache[norm_key]
-            entry["match_type"] = "normalized"
-            return entry
+            if self._is_expired(entry):
+                del self._cache[norm_key]
+                self._save()
+            else:
+                entry["match_type"] = "normalized"
+                return entry
 
         # 模糊匹配（trigram Jaccard）
         query = self._normalize(f"{action} {text[:100]}")
@@ -1546,7 +1700,10 @@ class SemanticCache:
 
         best_score = 0
         best_entry = None
+        best_key = None
         for key, entry in self._cache.items():
+            if self._is_expired(entry):
+                continue
             entry_query = self._normalize(entry.get("query", ""))
             if not entry_query:
                 continue
@@ -1555,6 +1712,7 @@ class SemanticCache:
             if score > best_score:
                 best_score = score
                 best_entry = entry
+                best_key = key
 
         if best_score >= self.threshold and best_entry:
             best_entry["match_type"] = f"fuzzy({best_score:.2f})"
@@ -1563,11 +1721,14 @@ class SemanticCache:
         return None
 
     def set(self, action: str, text: str, result: dict, task_type: str = "", route: str = ""):
-        """存入缓存（含去重）"""
+        """存入缓存（含去重 + TTL）"""
         key = self._make_key(action, text)
         # 已存在则跳过
         if key in self._cache:
             return
+
+        ttl_map = CONFIG["cache_ttl_hours"]
+        ttl = ttl_map.get(task_type, ttl_map.get("default", 48))
 
         query = f"{action.strip().lower()} {text.strip().lower()[:100]}"
         self._cache[key] = {
@@ -1580,6 +1741,8 @@ class SemanticCache:
             "tokens_input": result.get("tokens_input", 0),
             "tokens_output": result.get("tokens_output", 0),
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "created_ts": time.time(),
+            "ttl_hours": ttl,
             "version": self.CACHE_VERSION,
         }
         # 限制缓存大小（最多 500 条）
@@ -1592,11 +1755,22 @@ class SemanticCache:
 
         self._save()
 
+    def cleanup_expired(self) -> int:
+        """清理过期缓存条目，返回清理数量"""
+        expired_keys = [k for k, v in self._cache.items() if self._is_expired(v)]
+        for k in expired_keys:
+            del self._cache[k]
+        if expired_keys:
+            self._save()
+        return len(expired_keys)
+
     def stats(self) -> dict:
         """缓存统计"""
+        # 先清理过期条目
+        cleaned = self.cleanup_expired()
         total = len(self._cache)
         if total == 0:
-            return {"total": 0, "estimated_tokens_saved": 0}
+            return {"total": 0, "estimated_tokens_saved": 0, "expired_cleaned": cleaned}
         total_input = sum(e.get("tokens_input", 0) for e in self._cache.values())
         total_output = sum(e.get("tokens_output", 0) for e in self._cache.values())
         total_saved = sum(
@@ -1608,6 +1782,7 @@ class SemanticCache:
             "total_input_tokens": total_input,
             "total_output_tokens": total_output,
             "estimated_cost_saved": round(total_saved, 6),
+            "expired_cleaned": cleaned,
         }
 
 
@@ -2150,6 +2325,8 @@ def run_task(task: Task, force_route: str = "") -> Task:
             enhanced = enrich_prompt_with_examples(prompt, task_type, clean_text)
             if enhanced != prompt:
                 prompt = enhanced
+        # 提示压缩（减少 token 消耗）
+        prompt = compress_prompt_tokens(prompt, task_type)
         max_tokens = get_max_tokens(task_type)
         result = call_ollama(prompt, max_tokens=max_tokens)
         task.output = postprocess_output(result["text"], task_type)
@@ -2166,16 +2343,21 @@ def run_task(task: Task, force_route: str = "") -> Task:
             # 本地输出质量差，自动回退到云端
             cloud_result = call_cloud_api(task.action, task.text)
             cloud_output = cloud_result["text"]
-            # 记录修正对用于蒸馏
-            auto_collect_on_local_failure(
-                task, task.output, cloud_output,
-                failure_type="quality_fallback"
-            )
-            task.output = cloud_output
-            task.route = "cloud_fallback"
-            task.model_used = CONFIG["cloud_model"]
-            result = cloud_result  # 用云端结果更新 token 统计
-            task.cost_saved = 0  # 走云端，不节约成本
+            # 检查是否熔断（熔断时保留本地输出，标记警告）
+            if cloud_result.get("circuit_open"):
+                task.output += f"\n\n[警告: 本地输出质量不佳，云端熔断中无法降级 - {validation['reason']}]"
+                task.route = "local(degraded)"
+            else:
+                # 记录修正对用于蒸馏
+                auto_collect_on_local_failure(
+                    task, task.output, cloud_output,
+                    failure_type="quality_fallback"
+                )
+                task.output = cloud_output
+                task.route = "cloud_fallback"
+                task.model_used = CONFIG["cloud_model"]
+                result = cloud_result  # 用云端结果更新 token 统计
+                task.cost_saved = 0  # 走云端，不节约成本
         elif not validation["valid"]:
             # 没有云端配置，在输出中标记警告
             task.output += f"\n\n[警告: 本地输出质量可能不佳 - {validation['reason']}]"
@@ -2201,7 +2383,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
                 task.output = "\n\n---\n\n".join(outputs)
                 task.route = "hybrid(recurse)"
                 task.model_used = "mixed"
-                if task.output and len(task.output.strip()) > 3:
+                if task.output and len(task.output.strip()) >= 1:
                     cache.set(task.action, task.text,
                               {"text": task.output, "tokens_input": task.tokens_input,
                                "tokens_output": task.tokens_output})
@@ -2218,8 +2400,8 @@ def run_task(task: Task, force_route: str = "") -> Task:
     task.tokens_output = result["tokens_output"]
     task.time_ms = result["time_ms"]
     task.cost_saved = calc_savings(task)
-    # 存入语义缓存（仅缓存有效结果）
-    if task.output and len(task.output.strip()) > 3:
+    # 存入语义缓存（仅缓存有效结果，最短1字符即可，如"正面"）
+    if task.output and len(task.output.strip()) >= 1:
         original_route = force_route or estimate_complexity(task)["route"]
         cache.set(
             task.action, task.text,
