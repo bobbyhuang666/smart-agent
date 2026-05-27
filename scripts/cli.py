@@ -37,10 +37,34 @@ def main() -> None:
     parser.add_argument("--thresholds", action="store_true", help="自适应阈值")
     parser.add_argument("--models", action="store_true", help="模型列表")
     parser.add_argument("--benchmark", nargs="?", const="all", help="基准测试")
+    parser.add_argument("--weights", action="store_true", help="查看 A3M 权重状态")
+    parser.add_argument("--weights-reset", action="store_true", help="重置 A3M 权重")
     args = parser.parse_args()
 
     if args.stats:
         print(show_usage_stats())
+        return
+
+    if args.weights:
+        from weights import get_weight_tracker
+        wt = get_weight_tracker()
+        stats = wt.get_stats()
+        w = wt.get_weights()
+        print(f"A3M 可学习权重状态")
+        print(f"  学习数据: {stats['total']} 条记录")
+        print(f"  本地成功率: {stats.get('local_success_rate', 0):.0%}")
+        print(f"  当前阈值: {stats['current_threshold']:.3f} (默认: 3.0)")
+        print(f"  学习率: {stats['learning_rate']}")
+        print(f"\n权重参数:")
+        for k, v in w.to_dict().items():
+            print(f"  {k}: {v}")
+        return
+
+    if args.weights_reset:
+        from weights import get_weight_tracker
+        wt = get_weight_tracker()
+        wt.reset()
+        print("A3M 权重已重置为默认值")
         return
 
     if args.models:

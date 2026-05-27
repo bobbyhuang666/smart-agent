@@ -50,6 +50,7 @@ MANDATORY_LOCAL_PATTERNS: list[str] = ["本地", "离线", "不上传"]
 CLOUD_PATTERNS: list[str] = [
     "代码", "编程", "debug", "调试", "重构", "架构",
     "bug", "错误", "异常", "项目", "仓库", "git", "复杂", "高级",
+    "分布式", "高并发", "微服务", "系统设计", "算法",
 ]
 
 # 动词/操作词强度映射（正数=复杂，负数=简单）
@@ -84,13 +85,19 @@ HIGH_COMPLEXITY_DOMAINS: list[str] = [
 
 # ─── 复杂度评估 ──────────────────────────────────────────────
 
-def estimate_complexity(task: Task, base_threshold: float = 3.0) -> dict:
+def estimate_complexity(task: Task, base_threshold: float = 3.0, weights=None) -> dict:
     """
-    A3M 风格多信号复杂度评估。
+    A3M 风格多信号复杂度评估（支持可学习权重）。
+
+    参数:
+        weights: A3MWeights 实例，为 None 时使用默认权重
 
     返回:
         {"route": "local"|"cloud", "score": float, "reason": str, "will_save": bool}
     """
+    from weights import A3MWeights
+    w = weights or A3MWeights()
+
     action_lower = task.action.lower()
     text_len = len(task.text or "")
     file_count = len(task.files)
@@ -114,47 +121,47 @@ def estimate_complexity(task: Task, base_threshold: float = 3.0) -> dict:
 
     # 信号 2：多步检测
     multi_step_count = sum(1 for c in MULTI_STEP_CONNECTORS if c in action_lower)
-    multi_step_penalty = min(multi_step_count, 3) * 0.3
+    multi_step_penalty = min(multi_step_count, 3) * w.multi_step_weight
 
     # 信号 3：领域复杂度
-    domain_score = sum(0.5 for d in HIGH_COMPLEXITY_DOMAINS if d in action_lower)
+    domain_score = sum(w.domain_weight for d in HIGH_COMPLEXITY_DOMAINS if d in action_lower)
 
     # 信号 4：文本长度
-    if text_len > 2000:
-        text_score = 3
-    elif text_len > 1000:
-        text_score = 2
-    elif text_len > 500:
-        text_score = 1
+    if text_len > w.text_long_threshold:
+        text_score = w.text_long_score
+    elif text_len > w.text_mid_threshold:
+        text_score = w.text_mid_score
+    elif text_len > w.text_short_threshold:
+        text_score = w.text_short_score
     else:
         text_score = 0
-    if 0 < text_len < 50:
-        text_score = max(0, text_score - 1)
+    if 0 < text_len < w.text_tiny_max_len:
+        text_score = max(0, text_score + w.text_tiny_penalty)
 
     # 信号 5：文件数量
-    if file_count > 20:
-        file_score = 2
-    elif file_count > 5:
-        file_score = 1
+    if file_count > w.file_many_threshold:
+        file_score = w.file_many_score
+    elif file_count > w.file_some_threshold:
+        file_score = w.file_some_score
     else:
         file_score = 0
 
     # 信号 6：本地模式匹配
     local_match = sum(1 for p in LOCAL_TASK_PATTERNS if p in action_lower)
-    local_pattern_bonus = -min(local_match, 3)
+    local_pattern_bonus = w.local_pattern_weight * min(local_match, w.local_pattern_max)
 
     # 信号 7：action 长度
     action_len = len(action_lower)
-    if action_len > 100:
-        action_score = 0.5
-    elif action_len < 10:
-        action_score = -1
+    if action_len > w.action_long_threshold:
+        action_score = w.action_long_score
+    elif action_len < w.action_short_threshold:
+        action_score = w.action_short_score
     else:
         action_score = 0
 
     # 综合评分
     score = (
-        verb_score * 3.0
+        verb_score * w.verb_multiplier
         + multi_step_penalty
         + domain_score
         + text_score

@@ -121,6 +121,18 @@ class CapabilityTracker:
 cap_tracker = CapabilityTracker(CONFIG.cache_dir)
 
 
+# 可学习 A3M 权重
+_weight_tracker = None
+
+
+def _get_weight_tracker():
+    global _weight_tracker
+    if _weight_tracker is None:
+        from weights import get_weight_tracker
+        _weight_tracker = get_weight_tracker(CONFIG.cache_dir)
+    return _weight_tracker
+
+
 # ─── 预处理/后处理 ──────────────────────────────────────────────
 
 def preprocess_text(text: str, max_chars: int = 800) -> str:
@@ -428,12 +440,16 @@ def _finalize_task(task: Task) -> None:
 
 def run_task(task: Task, force_route: str = "") -> Task:
     """执行单个任务（核心入口）"""
-    # 1. 路由决策
+    # 1. 路由决策（使用可学习权重）
+    wt = _get_weight_tracker()
     if force_route:
         task.route = force_route
         task.model_used = CONFIG.local_model if force_route == "local" else CONFIG.cloud_model
     else:
-        decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
+        decision = estimate_complexity(
+            task, base_threshold=wt.get_weights().base_threshold,
+            weights=wt.get_weights(),
+        )
         task.route = decision["route"]
         task.model_used = CONFIG.local_model if decision["route"] == "local" else CONFIG.cloud_model
 
@@ -451,6 +467,18 @@ def run_task(task: Task, force_route: str = "") -> Task:
 
     # 4. 收尾（缓存、日志、审计）
     _finalize_task(task)
+
+    # 5. 学习反馈
+    task_type = detect_task_type(task.action, PROMPT_TEMPLATES)
+    success = task.route != "error" and bool(task.output and task.output.strip())
+    wt.record_outcome(
+        task_type=task_type,
+        route=task.route,
+        score=0,  # score 在 decision 中，这里简化
+        success=success,
+        local_model=task.model_used,
+    )
+
     return task
 
 
