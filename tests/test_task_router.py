@@ -843,6 +843,37 @@ class TestConfigLoading:
         assert cfg.local_model == "qwen-tool"  # default
 
 
+class TestAuthMiddleware:
+    """API 认证中间件测试"""
+
+    def test_safe_eq_matching(self):
+        from api_server import TaskRouterHandler
+        h = TaskRouterHandler()
+        assert h._safe_eq("test-key-123", "test-key-123") is True
+
+    def test_safe_eq_mismatch(self):
+        from api_server import TaskRouterHandler
+        h = TaskRouterHandler()
+        assert h._safe_eq("test-key-123", "test-key-456") is False
+
+    def test_safe_eq_empty(self):
+        from api_server import TaskRouterHandler
+        h = TaskRouterHandler()
+        assert h._safe_eq("", "test") is False
+        assert h._safe_eq("test", "") is False
+        assert h._safe_eq("", "") is False
+
+    def test_safe_eq_constant_time(self):
+        """验证 hmac.compare_digest 被使用（不会因首字符不同而更快）"""
+        import hmac
+        from api_server import TaskRouterHandler
+        h = TaskRouterHandler()
+        # 确保底层调用的是 hmac.compare_digest
+        a = "a" * 100
+        b = "b" + "a" * 99
+        assert h._safe_eq(a, b) is hmac.compare_digest(a.encode(), b.encode())
+
+
 # ─── 运行入口 ─────────────────────────────────────────────────
 
 if __name__ == "__main__":

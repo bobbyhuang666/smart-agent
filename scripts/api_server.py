@@ -17,6 +17,7 @@ import os
 import sys
 import json
 import time
+import hmac
 import asyncio
 import logging
 from datetime import datetime
@@ -80,6 +81,11 @@ class TaskRouterHandler:
         self.app.middlewares.append(self._auth_middleware)
         self.app.middlewares.append(self._cors_middleware)
 
+    @staticmethod
+    def _safe_eq(a: str, b: str) -> bool:
+        """常量时间比较，防止时序攻击"""
+        return hmac.compare_digest(a.encode(), b.encode()) if a and b else False
+
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         """API 认证中间件（Bearer token 或 X-API-Key）"""
@@ -88,15 +94,15 @@ class TaskRouterHandler:
 
         # 检查 Bearer token
         auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer ") and auth_header[7:] == API_KEY:
+        if auth_header.startswith("Bearer ") and self._safe_eq(auth_header[7:], API_KEY):
             return await handler(request)
 
         # 检查 X-API-Key header
-        if request.headers.get("X-API-Key") == API_KEY:
+        if self._safe_eq(request.headers.get("X-API-Key", ""), API_KEY):
             return await handler(request)
 
         # 检查 query 参数 ?api_key=
-        if request.query.get("api_key") == API_KEY:
+        if self._safe_eq(request.query.get("api_key", ""), API_KEY):
             return await handler(request)
 
         log.warning("认证失败: %s %s (来源: %s)", request.method, request.path, request.remote)
