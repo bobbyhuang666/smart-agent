@@ -157,7 +157,7 @@ def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[i
             )
 
         return result
-    except Exception as e:
+    except Exception:
         registry = _get_model_registry()
         if registry:
             registry.update_after_call(model, success=False, latency_ms=0)

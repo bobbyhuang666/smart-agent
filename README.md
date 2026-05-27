@@ -544,7 +544,6 @@ docker run -p 8930:8930 -e TASKROUTER_API_KEY=your-secret-key taskrouter
 
 ## 联系方式
 
-- GitHub: https://github.com/bobbyhuang666/task-router
 - Email: huangweijiebobby@gmail.com
 
 ---

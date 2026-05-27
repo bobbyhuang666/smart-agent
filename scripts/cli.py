@@ -10,7 +10,7 @@ import json
 
 from task_router import (
     Task, run_task, estimate, show_usage_stats,
-    decompose_task, execute_plan, get_model_registry, cache, store,
+    decompose_task, execute_plan, get_model_registry, store,
     cap_tracker,
 )
 

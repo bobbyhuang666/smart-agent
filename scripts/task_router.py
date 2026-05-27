@@ -6,9 +6,7 @@ TaskRouter — 自进化的企业级 AI 成本优化引擎
 模块化架构：config / routing / cache / models / prompts / validation / distillation / rules
 """
 
-import sys
 import os
-import json
 import time
 import logging
 import threading
@@ -33,7 +31,7 @@ from prompts import (
 from rules import rule_execute
 from validation import validate_local_output
 from distillation import (
-    DistillationStore, DistillationPair, collect_distillation_pair,
+    DistillationStore, collect_distillation_pair,
     get_dynamic_examples,
 )
 from io_utils import read_jsonl, append_jsonl

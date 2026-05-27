@@ -4,7 +4,6 @@ I/O 工具 — 共享的 JSONL 读写和文件操作
 
 import os
 import json
-from typing import Optional
 
 
 def read_jsonl(path: str) -> list[dict]:

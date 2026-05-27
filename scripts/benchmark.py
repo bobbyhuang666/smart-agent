@@ -7,8 +7,6 @@ TaskRouter 基准测试 — 路由准确率 & 节省比例
 """
 
 import json
-import time
-from typing import Optional
 
 from task_router import (
     Task, run_task, estimate_complexity, detect_task_type, calc_cost,
@@ -73,7 +71,6 @@ def run_benchmark() -> dict:
     total_router_cost = 0.0
     total_local = 0
     total_cloud = 0
-    total_cache = 0
     total_cases = 0
     correct_routes = 0
 

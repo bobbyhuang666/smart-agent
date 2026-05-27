@@ -326,7 +326,7 @@ class ModelRegistry:
         """
         import sys
         sys.path.insert(0, os.path.dirname(__file__))
-        from task_router import call_ollama, preprocess_text
+        from task_router import call_ollama
 
         if model_name:
             models_to_test = [model_name] if model_name in self.models else []
