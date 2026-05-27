@@ -12,8 +12,6 @@ import os
 import json
 import time
 from dataclasses import dataclass, asdict, field
-from pathlib import Path
-from typing import Optional
 
 # ─── 评估用例 ──────────────────────────────────────────────────
 
@@ -93,7 +91,10 @@ class QualityEvaluator:
 
     def __init__(self, eval_set: list[EvalCase] = None, cache_dir: str = None):
         self.eval_set = eval_set or DEFAULT_EVAL_SET
-        self.cache_dir = cache_dir or os.path.expanduser("~/.cache/task_router")
+        if cache_dir is None:
+            from config import get_config
+            cache_dir = get_config().cache_dir
+        self.cache_dir = cache_dir
         self.results_file = os.path.join(self.cache_dir, "eval_results.jsonl")
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -142,18 +143,21 @@ class QualityEvaluator:
         """
         import sys
         sys.path.insert(0, os.path.dirname(__file__))
-        from task_router import call_ollama, build_optimized_prompt, detect_task_type, preprocess_text
+        from task_router import call_ollama, build_optimized_prompt, preprocess_text
+        from routing import detect_task_type
+        from prompts import PROMPT_TEMPLATES
 
         eval_cases = cases or self.eval_set
         results = []
 
         for case in eval_cases:
-            task_type = case.task_type or detect_task_type(case.action)
+            task_type = case.task_type or detect_task_type(case.action, PROMPT_TEMPLATES)
             clean_text = preprocess_text(case.text)
             clean_action = preprocess_text(case.action, max_chars=200)
             prompt = build_optimized_prompt(task_type, clean_action, clean_text, [])
 
             start = time.time()
+            result = None
             try:
                 result = call_ollama(prompt, model=model, max_tokens=64)
                 output = result["text"].strip()
@@ -171,8 +175,8 @@ class QualityEvaluator:
                 score=score,
                 match_type=match_type,
                 latency_ms=latency,
-                tokens_input=result.get("tokens_input", 0) if "result" in dir() else 0,
-                tokens_output=result.get("tokens_output", 0) if "result" in dir() else 0,
+                tokens_input=result.get("tokens_input", 0) if result else 0,
+                tokens_output=result.get("tokens_output", 0) if result else 0,
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
             )
             results.append(eval_result)

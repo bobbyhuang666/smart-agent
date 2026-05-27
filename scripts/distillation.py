@@ -3,13 +3,13 @@
 """
 
 import os
-import json
 import time
 import hashlib
 from dataclasses import dataclass, asdict
 from typing import Optional
 
 from config import get_config, TASK_TO_CAPABILITY
+from io_utils import read_jsonl, append_jsonl, write_jsonl
 
 
 # ─── 蒸馏对状态 ──────────────────────────────────────────────
@@ -79,23 +79,10 @@ class DistillationStore:
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _load_all(self) -> list[dict]:
-        pairs: list[dict] = []
-        if not os.path.exists(self.pairs_file):
-            return pairs
-        with open(self.pairs_file) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        pairs.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        return pairs
+        return read_jsonl(self.pairs_file)
 
     def add_pair(self, pair: DistillationPair) -> None:
-        entry = asdict(pair)
-        with open(self.pairs_file, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_jsonl(self.pairs_file, asdict(pair))
 
     def _is_expired(self, pair: dict) -> bool:
         """检查蒸馏对是否过期"""
@@ -121,12 +108,9 @@ class DistillationStore:
         before = len(pairs)
         alive = [p for p in pairs if not self._is_expired(p)]
         if len(alive) < before:
-            # FIFO 淘汰超出上限的旧条目
             if len(alive) > self.MAX_PAIRS:
                 alive = alive[-self.MAX_PAIRS:]
-            with open(self.pairs_file, "w") as f:
-                for p in alive:
-                    f.write(json.dumps(p, ensure_ascii=False) + "\n")
+            write_jsonl(self.pairs_file, alive)
         return before - len(alive)
 
     def get_pairs(self, state: Optional[str] = None, capability: Optional[str] = None,
@@ -157,9 +141,7 @@ class DistillationStore:
                     p["quality_score"] = score
                 if reason:
                     p["judge_reason"] = reason
-        with open(self.pairs_file, "w") as f:
-            for p in pairs:
-                f.write(json.dumps(p, ensure_ascii=False) + "\n")
+        write_jsonl(self.pairs_file, pairs)
 
     def get_supported_pairs(self, capability: str, limit: int = 5) -> list[dict]:
         """获取指定能力的已验证训练对（用于 few-shot 注入）"""

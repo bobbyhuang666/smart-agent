@@ -13,8 +13,9 @@ import json
 import time
 import subprocess
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from typing import Optional
+
+from config import get_config
 
 # ─── 模型能力画像 ──────────────────────────────────────────────────
 
@@ -93,7 +94,7 @@ class ModelRegistry:
     """
 
     def __init__(self, cache_dir: str = None):
-        self.cache_dir = cache_dir or os.path.expanduser("~/.cache/task_router")
+        self.cache_dir = cache_dir or get_config().cache_dir
         self.registry_file = os.path.join(self.cache_dir, "model_registry.json")
         os.makedirs(self.cache_dir, exist_ok=True)
         self.models: dict[str, ModelProfile] = {}

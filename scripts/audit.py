@@ -12,9 +12,11 @@ import os
 import json
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Optional
 from collections import defaultdict
+
+from config import get_config
+from io_utils import read_jsonl, append_jsonl
 
 
 # ─── 审计事件 ──────────────────────────────────────────────────
@@ -55,7 +57,7 @@ class QuotaManager:
     """配额管理器"""
 
     def __init__(self, cache_dir: str = None):
-        self.cache_dir = cache_dir or os.path.expanduser("~/.cache/task_router")
+        self.cache_dir = cache_dir or get_config().cache_dir
         self.quotas_file = os.path.join(self.cache_dir, "quotas.json")
         self.usage_file = os.path.join(self.cache_dir, "quota_usage.jsonl")
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -200,15 +202,13 @@ class AuditLogger:
     """
 
     def __init__(self, cache_dir: str = None):
-        self.cache_dir = cache_dir or os.path.expanduser("~/.cache/task_router")
+        self.cache_dir = cache_dir or get_config().cache_dir
         self.audit_file = os.path.join(self.cache_dir, "audit.jsonl")
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def log(self, event: AuditEvent):
         """记录审计事件"""
-        entry = asdict(event)
-        with open(self.audit_file, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_jsonl(self.audit_file, asdict(event))
 
     def query(self, event_type: str = None, user_id: str = None,
               start_time: str = None, end_time: str = None,
@@ -226,28 +226,19 @@ class AuditLogger:
         返回:
             审计事件列表
         """
-        if not os.path.exists(self.audit_file):
-            return []
+        all_entries = read_jsonl(self.audit_file)
 
         results = []
-        with open(self.audit_file) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                except json.JSONDecodeError:
-                    continue
-
-                # 过滤
-                if event_type and entry.get("event_type") != event_type:
-                    continue
-                if user_id and entry.get("user_id") != user_id:
-                    continue
-                if start_time and entry.get("timestamp", "") < start_time:
-                    continue
-                if end_time and entry.get("timestamp", "") > end_time:
-                    continue
-
-                results.append(entry)
+        for entry in all_entries:
+            if event_type and entry.get("event_type") != event_type:
+                continue
+            if user_id and entry.get("user_id") != user_id:
+                continue
+            if start_time and entry.get("timestamp", "") < start_time:
+                continue
+            if end_time and entry.get("timestamp", "") > end_time:
+                continue
+            results.append(entry)
 
         return results[-limit:]
 

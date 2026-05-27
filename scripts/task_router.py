@@ -16,26 +16,24 @@ from typing import Any, Optional
 
 # ─── 模块导入 ──────────────────────────────────────────────────
 
-from config import get_config, set_config, RouterConfig, TASK_TO_CAPABILITY
+from config import get_config, TASK_TO_CAPABILITY
 from routing import (
     Task, estimate_complexity, detect_task_type,
     decompose_complex_task, _recursive_decompose,
-    LOCAL_TASK_PATTERNS, VERB_INTENSITY, MULTI_STEP_CONNECTORS,
-    HIGH_COMPLEXITY_DOMAINS, MANDATORY_LOCAL_PATTERNS, CLOUD_PATTERNS,
 )
 from cache import SemanticCache
 from models import call_ollama, call_cloud_api, circuit_breaker
 from prompts import (
     PROMPT_TEMPLATES, build_optimized_prompt, get_max_tokens,
-    compress_prompt_tokens, TOOL_PREFIX,
+    compress_prompt_tokens,
 )
 from rules import rule_execute
 from validation import validate_local_output
 from distillation import (
     DistillationStore, DistillationPair, collect_distillation_pair,
-    get_dynamic_examples, PAIR_SUPPORTED, PAIR_CONTESTED,
-    JUDGE_HIGH_THRESHOLD, JUDGE_MODERATE_THRESHOLD, SKIP_JUDGE_CAPABILITIES,
+    get_dynamic_examples,
 )
+from io_utils import append_jsonl
 
 # ─── 全局实例（延迟初始化）──────────────────────────────────────
 
@@ -49,7 +47,6 @@ store = DistillationStore(cache_dir=CONFIG.cache_dir)
 
 # 模型注册表（延迟加载）
 _model_registry = None
-_cap_tracker = None
 _log_lock = threading.Lock()
 
 RECURSE_SCORE_MIN = CONFIG.recurse_score_min
@@ -67,15 +64,6 @@ def get_model_registry() -> Any:
     return _model_registry
 
 
-def get_privacy_filter() -> Any:
-    """获取全局 PrivacyFilter 单例（委托给 privacy 模块）"""
-    try:
-        from privacy import get_privacy_filter as _get_pf
-        return _get_pf()
-    except ImportError:
-        return None
-
-
 class CapabilityTracker:
     """自适应阈值追踪器"""
 
@@ -90,8 +78,7 @@ class CapabilityTracker:
             "capability": capability, "success": success, "score": score,
             "task_type": task_type, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
-        with open(self.data_file, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_jsonl(self.data_file, entry)
 
     def get_success_rate(self, capability: str) -> float:
         records = self._load_recent(capability)
@@ -111,41 +98,23 @@ class CapabilityTracker:
             return DEFAULT_CAPABILITY_THRESHOLD + 1.0
 
     def get_all_adjustments(self) -> dict:
-        all_caps: set[str] = set()
-        if os.path.exists(self.data_file):
-            with open(self.data_file) as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                        all_caps.add(rec.get("capability", ""))
-                    except (json.JSONDecodeError, KeyError):
-                        continue
+        all_entries = read_jsonl(self.data_file)
+        all_caps = {e.get("capability", "") for e in all_entries if e.get("capability")}
         result = {}
         for cap in sorted(all_caps):
-            if cap:
-                rate = self.get_success_rate(cap)
-                threshold = self.get_adjusted_threshold(cap)
-                diff = round(threshold - DEFAULT_CAPABILITY_THRESHOLD, 1)
-                result[cap] = {
-                    "success_rate": round(rate, 2), "threshold": threshold,
-                    "adjustment": f"{'+' if diff > 0 else ''}{diff}",
-                    "direction": "上调" if diff > 0 else "下调" if diff < 0 else "不变",
-                }
+            rate = self.get_success_rate(cap)
+            threshold = self.get_adjusted_threshold(cap)
+            diff = round(threshold - DEFAULT_CAPABILITY_THRESHOLD, 1)
+            result[cap] = {
+                "success_rate": round(rate, 2), "threshold": threshold,
+                "adjustment": f"{'+' if diff > 0 else ''}{diff}",
+                "direction": "上调" if diff > 0 else "下调" if diff < 0 else "不变",
+            }
         return result
 
     def _load_recent(self, capability: str, n: int = LOOKBACK) -> list[dict]:
-        records: list[dict] = []
-        if not os.path.exists(self.data_file):
-            return records
-        with open(self.data_file) as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                    if rec.get("capability") == capability:
-                        records.append(rec)
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        return records[-n:]
+        all_entries = read_jsonl(self.data_file)
+        return [e for e in all_entries if e.get("capability") == capability][-n:]
 
 
 cap_tracker = CapabilityTracker(CONFIG.cache_dir)
@@ -199,7 +168,6 @@ def enrich_prompt_with_examples(prompt: str, task_type: str, text: str) -> str:
 
 def log_usage(task: Task) -> None:
     log_file = os.path.join(CONFIG.cache_dir, "usage.jsonl")
-    os.makedirs(CONFIG.cache_dir, exist_ok=True)
     entry = {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "date": time.strftime("%Y-%m-%d"),
@@ -211,10 +179,8 @@ def log_usage(task: Task) -> None:
         "cost_saved": task.cost_saved,
         "time_ms": task.time_ms,
     }
-    line = json.dumps(entry, ensure_ascii=False) + "\n"
     with _log_lock:
-        with open(log_file, "a") as f:
-            f.write(line)
+        append_jsonl(log_file, entry)
 
 
 def calc_cost(input_tokens: int, output_tokens: int) -> float:
@@ -547,71 +513,59 @@ def classify_task(task_desc: str, text: str = "") -> dict:
 
 # ─── 统计 ──────────────────────────────────────────────────────
 
+def _classify_route(route: str) -> str:
+    """路由分类: local / cache / cloud"""
+    if route == "local":
+        return "local"
+    if "cache" in route:
+        return "cache"
+    return "cloud"
+
+
 def show_usage_stats() -> str:
-    log_file = os.path.join(CONFIG.cache_dir, "usage.jsonl")
-    if not os.path.exists(log_file):
+    entries = read_jsonl(os.path.join(CONFIG.cache_dir, "usage.jsonl"))
+    if not entries:
         return "暂无使用记录"
 
-    total_local = total_cloud = total_cache = 0
+    totals = {"local": 0, "cloud": 0, "cache": 0}
     total_input = total_output = 0
     total_saved = 0.0
-    daily_stats: dict[str, dict] = {}
+    daily: dict[str, dict] = {}
 
-    with open(log_file) as f:
-        for line in f:
-            try:
-                e = json.loads(line.strip())
-            except json.JSONDecodeError:
-                continue
-            route = e.get("route", "")
-            if route == "local":
-                total_local += 1
-            elif "cache" in route:
-                total_cache += 1
-            else:
-                total_cloud += 1
-            total_input += e.get("tokens_input", 0)
-            total_output += e.get("tokens_output", 0)
-            total_saved += e.get("cost_saved", 0)
+    for e in entries:
+        cat = _classify_route(e.get("route", ""))
+        totals[cat] += 1
+        total_input += e.get("tokens_input", 0)
+        total_output += e.get("tokens_output", 0)
+        total_saved += e.get("cost_saved", 0)
 
-            day = e.get("date", e.get("time", "")[:10])
-            if day:
-                if day not in daily_stats:
-                    daily_stats[day] = {"local": 0, "cloud": 0, "cache": 0, "saved": 0.0}
-                if route == "local":
-                    daily_stats[day]["local"] += 1
-                elif "cache" in route:
-                    daily_stats[day]["cache"] += 1
-                else:
-                    daily_stats[day]["cloud"] += 1
-                daily_stats[day]["saved"] += e.get("cost_saved", 0)
+        day = e.get("date", e.get("time", "")[:10])
+        if day:
+            if day not in daily:
+                daily[day] = {"local": 0, "cloud": 0, "cache": 0, "saved": 0.0}
+            daily[day][cat] += 1
+            daily[day]["saved"] += e.get("cost_saved", 0)
 
-    cache_stats = cache.stats()
+    cs = cache.stats()
     result = (
         f"TaskRouter 使用统计\n{'='*40}\n"
-        f"本地调用: {total_local} 次\n云端调用: {total_cloud} 次\n缓存命中: {total_cache} 次\n"
+        f"本地调用: {totals['local']} 次\n云端调用: {totals['cloud']} 次\n缓存命中: {totals['cache']} 次\n"
         f"总输入 tokens: {total_input:,}\n总输出 tokens: {total_output:,}\n"
         f"理论最大节约: ${total_saved:.4f} (若全部走云端需支付的费用)\n"
     )
-    if cache_stats["total"] > 0:
-        result += f"\n语义缓存:\n  缓存条目: {cache_stats['total']}\n  缓存节约: ${cache_stats['estimated_cost_saved']:.4f}\n"
+    if cs["total"] > 0:
+        result += f"\n语义缓存:\n  缓存条目: {cs['total']}\n  缓存节约: ${cs['estimated_cost_saved']:.4f}\n"
 
-    if daily_stats:
-        sorted_days = sorted(daily_stats.keys(), reverse=True)[:7]
-        if sorted_days:
-            result += f"\n每日统计 (最近{len(sorted_days)}天):\n"
-            for day in sorted_days:
-                d = daily_stats[day]
-                total_day = d["local"] + d["cloud"] + d["cache"]
-                result += f"  {day}: {total_day}次 (本地{d['local']}/云端{d['cloud']}/缓存{d['cache']}) 省${d['saved']:.4f}\n"
+    for day in sorted(daily, reverse=True)[:7]:
+        d = daily[day]
+        result += f"  {day}: {d['local']+d['cloud']+d['cache']}次 (本地{d['local']}/云端{d['cloud']}/缓存{d['cache']}) 省${d['saved']:.4f}\n"
 
-    if circuit_breaker.state != "closed":
-        if circuit_breaker.state == "open":
-            result += f"\n云端熔断器: 🔴 熔断中 (连续失败{circuit_breaker.failures}次, {circuit_breaker.remaining_seconds()}秒后恢复)\n"
-        elif circuit_breaker.state == "half_open":
-            result += f"\n云端熔断器: 🟡 半开状态 (探测中)\n"
+    if circuit_breaker.state == "open":
+        result += f"\n云端熔断器: 🔴 熔断中 ({circuit_breaker.remaining_seconds()}秒后恢复)\n"
+    elif circuit_breaker.state == "half_open":
+        result += "\n云端熔断器: 🟡 半开状态 (探测中)\n"
     elif circuit_breaker.failures > 0:
-        result += f"\n云端熔断器: 🟢 已恢复 (上次连续失败{circuit_breaker.failures}次)\n"
+        result += "\n云端熔断器: 🟢 已恢复\n"
 
     return result
 

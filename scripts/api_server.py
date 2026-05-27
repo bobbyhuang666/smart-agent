@@ -186,7 +186,7 @@ class TaskRouterHandler:
         """健康检查"""
         return web.json_response({
             "status": "healthy",
-            "version": "2.0",
+            "version": "4.3.0",
             "timestamp": datetime.now().isoformat(),
             "local_model": CONFIG.local_model,
             "cloud_configured": bool(CONFIG.cloud_api_key),

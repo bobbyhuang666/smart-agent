@@ -300,7 +300,11 @@ if __name__ == "__main__":
     parser.add_argument("--cache-dir", default=None, help="缓存目录")
     args = parser.parse_args()
 
-    cache_dir = args.cache_dir or os.path.expanduser("~/.cache/task_router")
+    if args.cache_dir:
+        cache_dir = args.cache_dir
+    else:
+        from config import get_config
+        cache_dir = get_config().cache_dir
 
     if args.json:
         summary = generate_summary_json(cache_dir, args.days)

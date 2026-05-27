@@ -233,15 +233,6 @@ class PrivacyFilter:
 
 # ─── 便捷函数 ──────────────────────────────────────────────────
 
-_default_filter = None
-
-def get_privacy_filter() -> PrivacyFilter:
-    """获取默认隐私过滤器（单例）"""
-    global _default_filter
-    if _default_filter is None:
-        _default_filter = PrivacyFilter()
-    return _default_filter
-
 def quick_anonymize(text: str) -> str:
     """快速脱敏（只返回脱敏文本）"""
     return get_privacy_filter().anonymize(text).text

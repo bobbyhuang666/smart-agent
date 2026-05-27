@@ -4,12 +4,13 @@
 
 import os
 import re
-import json
 import time
 import unicodedata
 import hashlib
 import threading
 from typing import Optional
+
+from io_utils import read_jsonl, append_jsonl, write_jsonl
 
 
 class SemanticCache:
@@ -25,26 +26,14 @@ class SemanticCache:
         self._load()
 
     def _load(self) -> None:
-        if not os.path.exists(self.cache_file):
-            return
-        with open(self.cache_file) as f:
-            for line in f:
-                try:
-                    self._entries.append(json.loads(line.strip()))
-                except json.JSONDecodeError:
-                    pass
+        self._entries = read_jsonl(self.cache_file)
 
     def _save(self) -> None:
-        os.makedirs(self.cache_dir, exist_ok=True)
-        with open(self.cache_file, "w") as f:
-            for entry in self._entries:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        write_jsonl(self.cache_file, self._entries)
 
     def _append_entry(self, entry: dict) -> None:
         """追加单条记录到文件（避免全量重写）"""
-        os.makedirs(self.cache_dir, exist_ok=True)
-        with open(self.cache_file, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_jsonl(self.cache_file, entry)
 
     @staticmethod
     def _normalize(text: str) -> str:

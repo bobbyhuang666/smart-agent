@@ -257,9 +257,6 @@ def call_cloud_api(prompt: str, text: str = "") -> dict[str, Any]:
 
 
 def _get_privacy_filter() -> Any:
-    """获取全局 PrivacyFilter 单例（委托给 privacy 模块）"""
-    try:
-        from privacy import get_privacy_filter as _get_pf
-        return _get_pf()
-    except ImportError:
-        return None
+    """获取全局 PrivacyFilter 单例"""
+    from privacy import get_privacy_filter
+    return get_privacy_filter()

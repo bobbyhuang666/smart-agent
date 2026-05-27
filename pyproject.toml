@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "task-router"
-version = "4.3.0"
+version = "4.4.0"
 description = "自进化的企业级 AI 成本优化引擎 — 自动路由任务到最佳模型，通过蒸馏闭环让本地模型持续变强"
 readme = "README.md"
 license = {text = "MIT"}
