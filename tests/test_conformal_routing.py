@@ -413,15 +413,16 @@ class TestConformalizedRouter:
         assert len(decision.prediction_set) >= 1
 
     def test_override_suppress_escalation(self, router):
-        """conformal 预测集仅含 local 时，抑制升级"""
-        # 添加低 score 的校准数据（高 conforming）
+        """nonconforming + 窄区间时，用 raw_should_escalate 决策"""
+        # 添加中等 score 校准数据
         for _ in range(30):
-            router.calibrator.add_score(0.1, was_correct=True)
+            router.calibrator.add_score(0.3, was_correct=True)
 
-        cascade = make_cascade_decision(escalate=True, calibrated_conf=0.9)
-        tqbc = make_tqbc_decision(should_escalate=True, calibrated_conf=0.9, uncertainty=0.1)
-        ml = make_ml_prediction(should_use_local=False, confidence=0.9)
+        cascade = make_cascade_decision(escalate=False, calibrated_conf=0.8)
+        tqbc = make_tqbc_decision(should_escalate=False, calibrated_conf=0.8, uncertainty=0.2)
+        ml = make_ml_prediction(should_use_local=True, confidence=0.8)
 
+        # 高不确定性 → score > threshold → nonconforming
         decision = router.decide(
             cascade_decision=cascade,
             tqbc_decision=tqbc,
@@ -429,26 +430,28 @@ class TestConformalizedRouter:
             active_verify=False,
             features=[0.5] * 8,
             task_type="translation",
-            raw_should_escalate=True,  # OR 融合说升级
-            quantile_features=MockQuantileFeatures(q50_entropy=0.5, q50_margin=0.8),
+            raw_should_escalate=False,  # OR 融合说不升级
+            quantile_features=MockQuantileFeatures(q50_entropy=2.5, q50_margin=0.1),
         )
 
-        # 如果 score 低（conforming），应抑制升级
-        if decision.nonconformity_score < decision.threshold:
+        # nonconforming → prediction_set = {local, cloud}
+        assert len(decision.prediction_set) == 2
+        # 窄区间 → 用 raw_should_escalate=False → 不升级
+        if decision.interval_width <= router.escalation_margin:
             assert decision.should_escalate is False
+            assert decision.route == "local"
 
     def test_force_escalation_on_wide_interval(self, router):
-        """区间过宽时强制升级"""
-        # 添加混合校准数据
-        for _ in range(20):
-            router.calibrator.add_score(0.5, was_correct=True)
-        for _ in range(20):
-            router.calibrator.add_score(0.5, was_correct=False)
+        """prediction_set={local,cloud} 且区间过宽时强制升级"""
+        # 添加低 score 校准数据，使阈值约 0.3 < score → nonconforming
+        for _ in range(30):
+            router.calibrator.add_score(0.3, was_correct=False)
 
         cascade = make_cascade_decision(escalate=False, calibrated_conf=0.5)
         tqbc = make_tqbc_decision(should_escalate=False, calibrated_conf=0.5, uncertainty=0.5)
         ml = make_ml_prediction(should_use_local=True, confidence=0.5)
 
+        # 高不确定性特征 → score > threshold → nonconforming → prediction_set = {local, cloud}
         decision = router.decide(
             cascade_decision=cascade,
             tqbc_decision=tqbc,
@@ -457,13 +460,16 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="unknown",
             raw_should_escalate=False,
-            quantile_features=MockQuantileFeatures(q50_entropy=2.0, q50_margin=0.3),
+            quantile_features=MockQuantileFeatures(q50_entropy=3.0, q50_margin=0.05, entropy_variance=1.0),
         )
 
-        # 检查决策结构完整
-        assert decision.nonconformity_score >= 0
-        assert decision.threshold >= 0
-        assert len(decision.prediction_set) >= 1
+        # score > threshold → nonconforming → prediction_set = {local, cloud}
+        assert decision.nonconformity_score > decision.threshold, \
+            f"score {decision.nonconformity_score:.4f} should be > threshold {decision.threshold:.4f}"
+        assert len(decision.prediction_set) == 2
+        # 区间过宽 → 强制升级
+        if decision.interval_width > router.escalation_margin:
+            assert decision.should_escalate is True
 
     def test_record_outcome_updates_aci(self, router):
         """record_outcome 更新 ACI 状态"""
@@ -586,6 +592,55 @@ class TestConformalizedRouter:
         assert "aleatoric" in sources
         assert "distribution_shift" in sources
         assert "cold_start" in sources
+
+    def test_fallback_without_quantile_features(self, router):
+        """无 quantile_features 时回退到投票熵"""
+        for _ in range(30):
+            router.calibrator.add_score(0.3, was_correct=True)
+
+        cascade = make_cascade_decision(escalate=False, calibrated_conf=0.8)
+        tqbc = make_tqbc_decision(should_escalate=False, calibrated_conf=0.8, uncertainty=0.2)
+        ml = make_ml_prediction(should_use_local=True, confidence=0.8)
+
+        decision = router.decide(
+            cascade_decision=cascade,
+            tqbc_decision=tqbc,
+            ml_prediction=ml,
+            active_verify=False,
+            features=[0.5] * 8,
+            task_type="test",
+            raw_should_escalate=False,
+            quantile_features=None,  # 无原始特征
+        )
+
+        # 应正常工作，score 使用 fallback 路径
+        assert 0 <= decision.nonconformity_score <= 1
+        assert decision.route in ("local", "cloud")
+
+    def test_confidence_interval_with_data(self, router):
+        """有足够数据时置信区间非默认值"""
+        # 添加足够数据
+        for i in range(30):
+            router.calibrator.add_score(i / 30.0, was_correct=True)
+
+        cascade = make_cascade_decision()
+        tqbc = make_tqbc_decision()
+        ml = make_ml_prediction()
+
+        decision = router.decide(
+            cascade_decision=cascade,
+            tqbc_decision=tqbc,
+            ml_prediction=ml,
+            active_verify=False,
+            features=[0.5] * 8,
+            task_type="test",
+            raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
+        )
+
+        # 有数据时不应是默认的 (0.1, 0.9)
+        assert decision.confidence_interval != (0.1, 0.9) or len(router.calibrator.scores) < 5
+        assert 0 <= decision.confidence_interval[0] <= decision.confidence_interval[1] <= 1
 
     def test_layer_signals_complete(self, router):
         """层信号包含所有四层"""
