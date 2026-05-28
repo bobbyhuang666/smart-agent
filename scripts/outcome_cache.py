@@ -24,7 +24,6 @@ import time
 import threading
 from typing import Optional
 
-from io_utils import read_jsonl, append_jsonl
 
 
 class OutcomeAwareCache:

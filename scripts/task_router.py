@@ -27,7 +27,6 @@ from cache import SemanticCache
 from models import call_ollama, call_cloud_api, circuit_breaker
 from prompts import (
     PROMPT_TEMPLATES, build_optimized_prompt, get_max_tokens,
-    compress_prompt_tokens,
 )
 from rules import rule_execute
 from validation import validate_local_output
@@ -37,12 +36,12 @@ from distillation import (
 )
 from io_utils import read_jsonl, append_jsonl
 from reasoning import (
-    select_strategy, select_reasoning_strategy, enhance_prompt_with_strategy,
+    select_strategy, enhance_prompt_with_strategy,
     STRATEGY_TOKEN_MULTIPLIER, TOKEN_BUDGET, get_strategy_tracker,
 )
 from adaptive_compression import compress_adaptive
 from confidence import extract_confidence, extract_confidence_from_text, CascadeDecision
-from meta_learner import extract_routing_features, MetaLearner, ActiveLearner, get_meta_learner, get_active_learner
+from meta_learner import extract_routing_features, get_meta_learner, get_active_learner
 from tqbc import TQBCRouter
 from outcome_cache import OutcomeAwareCache
 

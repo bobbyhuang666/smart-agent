@@ -19,7 +19,7 @@
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from io_utils import read_jsonl, append_jsonl
 
@@ -260,7 +260,6 @@ def compress_adaptive(
     kept_lines = scored_lines[:target_lines]
 
     # 恢复原始顺序
-    line_order = {id(line): i for i, (_, line) in enumerate(scored_lines)}
     # 简单方案：保留的行按原始顺序
     kept_set = set(id(line) for _, line in kept_lines)
     result_lines = []
