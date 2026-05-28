@@ -19,10 +19,11 @@ import tempfile
 
 from task_router import (
     Task, estimate_complexity, detect_task_type, preprocess_text,
-    compress_prompt_tokens, postprocess_output, validate_local_output,
+    postprocess_output, validate_local_output,
     calc_cost, calc_savings, decompose_complex_task,
     _recursive_decompose,
 )
+from prompts import compress_prompt_tokens
 from prompts import PROMPT_TEMPLATES
 from model_registry import ModelRegistry, ModelProfile
 from audit import AuditLogger, AuditEvent, QuotaManager, QuotaConfig
