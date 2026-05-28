@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-TaskRouter — 自进化的企业级 AI 成本优化引擎
+TaskRouter — 企业 LLM 网关
 
-自动路由任务到最佳模型，通过蒸馏闭环让本地模型持续变强。
+安全审计 · 智能路由 · 自动优化
+统一管理所有 LLM 调用，三层决策融合确保路由准确，蒸馏闭环让系统越用越聪明。
 模块化架构：config / routing / cache / models / prompts / validation / distillation / rules
 """
 

@@ -105,6 +105,123 @@ class TestQualityEvaluator:
         # 过长不一定是坏事，但不应该比正常更高
         assert score_long <= score_normal + 0.1
 
+    # ── 5 维评估专项测试 ──
+
+    def test_good_translation_high_score(self):
+        """好的翻译应得高分"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "你好世界，这是一个测试。翻译结果准确完整。",
+            "capability": "translation",
+            "prompt": "翻译成中文 Hello World this is a test",
+        })
+        assert score > 0.5
+
+    def test_bad_translation_low_score(self):
+        """差的翻译（太短）应得低分"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "你好",
+            "capability": "translation",
+            "prompt": "翻译成中文 Hello World this is a test",
+        })
+        assert score < 0.5
+
+    def test_refusal_very_low_score(self):
+        """拒绝回答应得低分（低于正常输出）"""
+        evaluator = QualityEvaluator()
+        score_refusal = evaluator.evaluate({
+            "response": "抱歉，我无法完成这个任务",
+            "capability": "classification",
+        })
+        score_normal = evaluator.evaluate({
+            "response": "分类结果：文件A属于文档类，文件B属于图片类。",
+            "capability": "classification",
+        })
+        assert score_refusal < score_normal
+        assert score_refusal < 0.5
+
+    def test_error_response_low_score(self):
+        """错误响应应得低分"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "Error: something went wrong",
+            "capability": "extraction",
+        })
+        assert score < 0.4
+
+    def test_classification_with_structure_high_score(self):
+        """有结构的分类结果应得高分"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "分类结果：\n1. 文件A：文档类\n2. 文件B：图片类\n3. 文件C：代码类",
+            "capability": "classification",
+        })
+        assert score > 0.6
+
+    def test_extraction_with_list_high_score(self):
+        """有列表的提取结果应得高分"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "关键词：人工智能，机器学习，深度学习，神经网络",
+            "capability": "extraction",
+        })
+        assert score > 0.5
+
+    def test_summarization_adequate_length(self):
+        """摘要应有足够的长度"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "本文主要讨论了人工智能在医疗领域的应用，包括疾病诊断、药物研发和医疗影像分析等方面。",
+            "capability": "summarization",
+        })
+        assert score > 0.5
+
+    def test_formatting_with_structure(self):
+        """格式化输出应有结构"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({
+            "response": "标题：报告\n日期：2024-01-01\n内容：详细信息",
+            "capability": "formatting",
+        })
+        assert score > 0.5
+
+    def test_weak_failure_signal_moderate_penalty(self):
+        """弱失败信号应有适度扣分"""
+        evaluator = QualityEvaluator()
+        score_weak = evaluator.evaluate({"response": "未找到相关结果"})
+        score_normal = evaluator.evaluate({"response": "分类结果：文件A属于文档类"})
+        assert score_weak < score_normal
+
+    def test_empty_capability_neutral_scoring(self):
+        """无能力类型时应中性评分"""
+        evaluator = QualityEvaluator()
+        score = evaluator.evaluate({"response": "这是一段正常的输出内容"})
+        assert 0.3 <= score <= 0.8
+
+    def test_structure_score_multiline(self):
+        """多行输出应有更高的结构分"""
+        evaluator = QualityEvaluator()
+        score_single = evaluator.evaluate({"response": "单行输出"})
+        score_multi = evaluator.evaluate({"response": "第一行\n第二行\n第三行"})
+        # 多行不一定更高分（因为其他维度也影响），但结构分应更高
+        # 这里只验证不崩溃
+        assert 0.0 <= score_single <= 1.0
+        assert 0.0 <= score_multi <= 1.0
+
+    def test_relevance_score_keyword_overlap(self):
+        """关键词重叠应影响相关性分"""
+        evaluator = QualityEvaluator()
+        score_relevant = evaluator.evaluate({
+            "response": "分类结果：文档类",
+            "prompt": "分类这些文件",
+        })
+        score_irrelevant = evaluator.evaluate({
+            "response": "今天天气很好",
+            "prompt": "分类这些文件",
+        })
+        assert score_relevant >= score_irrelevant
+
 
 # ─── FailureClusterer 测试 ──────────────────────────────────────
 

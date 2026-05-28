@@ -1,8 +1,19 @@
 # TaskRouter
 
-**简单任务走本地小模型不花钱，复杂任务走云端大模型才花钱，自动判断、越用越准。**
+**企业 LLM 网关 — 安全审计 · 智能路由 · 自动优化**
 
-## 实测数据 (v4.5.1)
+统一管理所有 LLM 调用，简单任务走本地小模型（零成本、零延迟），复杂任务走云端大模型（按需付费）。三层决策融合确保路由准确，蒸馏闭环让系统越用越聪明。
+
+## 核心价值
+
+| 能力 | 说明 |
+|------|------|
+| **安全审计** | 完整操作日志 + 配额管理 + API 认证 + PII 自动脱敏 |
+| **智能路由** | 三层决策融合（置信度级联 + Meta-Learner + 主动学习） |
+| **自动优化** | 蒸馏闭环：云端响应 → 质量评估 → 本地模型持续进化 |
+| **中文企业场景** | 合同、发票、会议纪要等 6 个专项模板，开箱即用 |
+
+## 实测数据 (v5.0)
 
 | 场景 | 全云端成本 | TaskRouter 成本 | 节省比例 |
 |------|-----------|----------------|---------|
@@ -13,47 +24,93 @@
 
 > *代码生成中 1 条复杂任务自动路由到云端（正确行为），其余 4 条走本地免费。路由准确率 100%。
 
-```
-Before: 所有任务 → 云端 API → $0.0203/15条
-After:  简单任务 → 本地免费 + 复杂任务 → 云端 → $0.0120/15条
-                                                          省 41%
-```
-
-## 核心特性
-
-| 特性 | 说明 |
-|------|------|
-| **A3M 多信号路由** | 动词强度 + 多步检测 + 领域复杂度，自动判断任务难度 |
-| **五层路由决策** | 语义缓存 → 规则引擎 → 本地模型 → 递归拆解 → 云端 API |
-| **蒸馏学习闭环** | 每次云端调用自动采集训练对，本地模型越用越强 |
-| **输出质量验证** | 本地输出不合格自动回退云端，采集修正对 |
-| **中文企业场景** | 合同、发票、会议纪要等 6 个专项模板 |
-| **数据隐私保护** | PII 自动检测脱敏后再发送云端 |
-| **企业级审计** | 完整操作日志 + 配额管理 + API 认证 |
-| **自适应阈值** | 根据历史成功率动态调整路由策略 |
-| **A3M 可学习权重** | 路由评分参数从反馈中自动学习优化 |
-
 ---
 
 ## 工作原理
 
 ```
-用户任务 ─→ A3M 多信号评估 ─→ 五层路由决策
-                              │
-                              ├→ 语义缓存命中 → 0ms, 0 token
-                              ├→ 规则引擎兜底 → 0ms, 100% 准确
-                              ├→ 本地模型执行 → ~1-2s, 免费
-                              ├→ 递归拆解混合 → 部分本地+部分云端
-                              └→ 云端 API 调用 → 按量付费
-                                    │
-                                    ▼
-                              蒸馏采集 → Judge 评判 → Few-Shot 注入
-                                    │
-                                    ▼
-                              本地模型变强 → 更多任务走本地 → 更省钱
+用户任务 ─→ 三层决策融合 ─→ 路由执行
+                │
+                ├→ 置信度级联：token 级 logprobs → 校准 → 阈值判断
+                ├→ Meta-Learner：10 维特征 → 在线学习 → 全局决策
+                └→ 主动学习：不确定性采样 → 优先收集高价值数据
+                      │
+                      ▼
+                路由结果
+                ├→ 语义缓存命中 → 0ms, 0 token
+                ├→ 规则引擎兜底 → 0ms, 100% 准确
+                ├→ 本地模型执行 → ~1-2s, 免费
+                ├→ 递归拆解混合 → 部分本地+部分云端
+                └→ 云端 API 调用 → 按量付费
+                      │
+                      ▼
+                蒸馏闭环
+                ├→ QualityEvaluator 5 维质量评估
+                ├→ FailureClusterer 失败模式聚类
+                └→ 闭环推进 hypothesis → supported/contested
 ```
 
-**关键：** 每次云端调用都在"训练"本地模型，系统越用越聪明。
+---
+
+## 三层决策融合
+
+### 第一层：置信度门控级联
+
+从 token 级 logprobs 提取置信度信号，通过 Pool Adjacent Violators (PAV) 算法校准，低于阈值自动升级到云端。
+
+```
+本地执行 → logprobs 提取 → 熵/置信度/边际 → PAV 校准 → 阈值判断
+                                                        ├→ 置信度高 → 本地结果
+                                                        └→ 置信度低 → 升级云端
+```
+
+### 第二层：Meta-Learner 全局决策
+
+在线 Logistic Regression，10 维特征向量统一所有路由信号：
+
+| 特征 | 说明 |
+|------|------|
+| complexity_score | A3M 复杂度评分 |
+| confidence | 本地模型置信度 |
+| entropy | token 熵 |
+| margin | top-1 vs top-2 差距 |
+| text_length | 输入文本长度 |
+| file_count | 文件数量 |
+| capability_success | 该能力的历史成功率 |
+| strategy_cot/structured | 推理策略 |
+
+### 第三层：主动学习
+
+追踪每个任务类型的预测方差，对不确定的任务类型主动请求云端验证，优先收集高价值训练数据。
+
+冷启动保护：样本数不足 5 时不触发验证，避免新任务类型的额外成本。
+
+---
+
+## 蒸馏闭环
+
+### QualityEvaluator 5 维质量评估
+
+| 维度 | 权重 | 说明 |
+|------|------|------|
+| 结构完整性 | 25% | 输出是否有组织（列表、分类、段落） |
+| 内容相关性 | 25% | 输出是否与输入内容相关 |
+| 失败信号 | 25% | 是否包含拒绝/错误信号 |
+| 任务适配 | 15% | 输出格式是否匹配任务类型 |
+| 一致性 | 10% | 与本地输出的重叠度 |
+
+### 状态流转
+
+```
+云端响应 → hypothesis → QualityEvaluator 评估
+                        ├→ score ≥ 0.9 → supported（可注入 few-shot）
+                        ├→ score < 0.5 → contested（需人工审核）
+                        └→ 0.5 ≤ score < 0.9 → hypothesis（继续观察）
+```
+
+### FailureClusterer 失败模式聚类
+
+自动将相似失败归类：refusal（拒绝）、error（错误）、divergent（偏离）、empty_output（空输出）、quality_low（质量低）。
 
 ---
 
@@ -74,8 +131,10 @@ sma --task "翻译成中文" --text "Hello World"
 # 4. 查看累计节约
 sma --stats
 
-# 5. 运行基准测试
-python3 scripts/benchmark.py
+# 5. 查看三层决策状态
+sma --cascade        # 置信度级联统计
+sma --meta           # Meta-Learner 特征权重
+sma --active         # 主动学习不确定性
 
 # 6. 启动 Web 仪表盘
 python3 scripts/api_server.py --port 8930
@@ -232,7 +291,7 @@ sma --distill-stats
 sma --distill-export
 ```
 
-蒸馏流程：云端响应 → Judge 评判 → SUPPORTED/CONTESTED → 提取 few-shot → 注入 prompt → 本地模型变强。
+蒸馏流程：云端响应 → 5 维质量评估 → 状态推进 → Few-Shot 注入 → 本地模型变强。
 
 ---
 
@@ -259,20 +318,6 @@ sma --distill-export
 多步检测: "并且"、"然后"、"先…再…"、序号等
 领域检测: 金融/法律/医疗/算法 +0.5
 ```
-
-### A3M 可学习权重
-
-所有路由评分参数（动词乘数、多步权重、领域权重、文本阈值等）均可从执行反馈中自动学习：
-
-```bash
-# 查看当前权重和学习状态
-sma --weights
-
-# 重置为默认权重
-sma --weights-reset
-```
-
-学习机制：本地成功 → 阈值升高（鼓励更多走本地）；本地失败 → 阈值降低（减少走本地）。阈值自动限制在 [1.0, 8.0] 范围内。
 
 ### 云端重试 + 熔断
 
@@ -303,8 +348,9 @@ sma --weights-reset
 | `sma --benchmark [model]` | 基准测试 |
 | `sma --distill` | 蒸馏评判 |
 | `sma --distill-stats` | 蒸馏状态 |
-| `sma --weights` | 查看 A3M 可学习权重 |
-| `sma --weights-reset` | 重置 A3M 权重为默认值 |
+| `sma --cascade` | 置信度级联统计 |
+| `sma --meta` | Meta-Learner 特征权重 |
+| `sma --active` | 主动学习不确定性 |
 | `sma -i` | 交互模式 |
 
 ---
@@ -334,29 +380,19 @@ export CLOUD_MODEL="gpt-4o"
 
 ## 测试 & 质量
 
-- **110 个自动化测试**，覆盖核心路由、缓存、蒸馏、熔断器、API 认证、路由准确率
+- **276 个自动化测试**，覆盖三层决策融合、5 维质量评估、路由准确率、缓存、蒸馏、熔断器
 - **路由准确率基准**: 73 个标注用例，19 个测试方法，100% 通过
 - **CI/CD**: GitHub Actions，Python 3.10-3.13 矩阵测试 + ruff 静态分析
-- **覆盖率**: 45%（核心引擎 task_router.py 67%，路由模块 routing.py 90%）
-
-```
-scripts/task_router.py  379 stmts  125 miss  67%  ← 核心引擎
-scripts/routing.py      126 stmts   12 miss  90%  ← 路由决策
-scripts/cache.py         98 stmts   14 miss  86%  ← 语义缓存
-scripts/distillation.py 139 stmts   27 miss  81%  ← 蒸馏系统
-scripts/weights.py       89 stmts   19 miss  79%  ← A3M 可学习权重
-TOTAL                  2501 stmts 1365 miss  45%
-```
 
 ```bash
 # 运行全部测试
 python3 -m pytest tests/ -v
 
-# 运行覆盖率
-python3 -m pytest tests/ --cov=scripts --cov-report=term-missing
-
 # 运行路由准确率基准
 python3 -m pytest tests/test_routing_accuracy.py -v
+
+# 运行三层决策融合测试
+python3 -m pytest tests/test_decision_fusion.py -v
 ```
 
 ---
@@ -377,10 +413,10 @@ docker run -p 8930:8930 -e TASKROUTER_API_KEY=your-secret-key taskrouter
 bash scripts/setup-hooks.sh
 
 # 手动运行 ruff 检查
-ruff check scripts/ --select E,F,W --ignore E501,E402,F541
+ruff check scripts/ --select E,F,W --ignore E501,E402
 
 # 自动修复 ruff 错误
-ruff check scripts/ --select E,F,W --ignore E501,E402,F541 --fix
+ruff check scripts/ --select E,F,W --ignore E501,E402 --fix
 ```
 
 ---
@@ -401,45 +437,58 @@ MIT
 
 # TaskRouter
 
-**Self-evolving Enterprise AI Cost Optimization Engine** — Automatically routes tasks to the optimal model, and through distillation loops, continuously strengthens local models to save more over time.
+**Enterprise LLM Gateway — Security Audit · Intelligent Routing · Automatic Optimization**
 
-> **Key Differentiator:** Not just routing, but learning routing. Every cloud call trains the local model, making the system smarter with use.
+Unified management of all LLM calls. Simple tasks go to local small models (zero cost, zero latency), complex tasks go to cloud large models (pay-per-use). Three-layer decision fusion ensures routing accuracy, and the distillation loop makes the system smarter over time.
 
----
+## Core Value
 
-## Why TaskRouter?
-
-| Feature | TaskRouter | Other Routing Tools |
-|---------|-----------|---------------------|
-| **Distillation Loop** | Cloud responses → continuous local model evolution | Static routing only |
-| **Chinese Enterprise Scenarios** | Contracts, invoices, meeting minutes templates | English-focused |
-| **Task Decomposition** | Compound tasks auto-split into subtasks | Single-layer classification |
-| **Adaptive Thresholds** | Dynamic routing based on historical success rates | Fixed thresholds |
-| **Learnable Weights** | A3M routing parameters auto-optimize from feedback | Static scoring |
-| **Data Privacy** | PII auto-detection and anonymization before cloud | No privacy protection |
-| **Enterprise Audit** | Complete operation logs + quota management | No audit capability |
-
----
+| Capability | Description |
+|------------|-------------|
+| **Security Audit** | Complete operation logs + quota management + API authentication + PII auto-anonymization |
+| **Intelligent Routing** | Three-layer decision fusion (confidence cascade + Meta-Learner + active learning) |
+| **Automatic Optimization** | Distillation loop: cloud response → quality evaluation → local model evolution |
+| **Chinese Enterprise Scenarios** | 6 built-in templates for contracts, invoices, meeting minutes, etc. |
 
 ## How It Works
 
 ```
-User Task ─→ A3M Multi-signal Evaluation ─→ Five-layer Routing Decision
-                                              │
-                                              ├→ Semantic Cache Hit → 0ms, 0 tokens
-                                              ├→ Rule Engine Fallback → 0ms, 100% accurate
-                                              ├→ Local Model Execution → ~1-2s, free
-                                              ├→ Recursive Decomposition → partial local + cloud
-                                              └→ Cloud API Call → pay-per-use
-                                                    │
-                                                    ▼
-                                              Distillation Collection → Judge → Few-Shot Injection
-                                                    │
-                                                    ▼
-                                              Local Model Improves → More Tasks Local → More Savings
+User Task ─→ Three-Layer Decision Fusion ─→ Route Execution
+                │
+                ├→ Confidence Cascade: token-level logprobs → calibration → threshold
+                ├→ Meta-Learner: 10-dim features → online learning → global decision
+                └→ Active Learning: uncertainty sampling → prioritize high-value data
+                      │
+                      ▼
+                Route Result
+                ├→ Semantic Cache Hit → 0ms, 0 tokens
+                ├→ Rule Engine Fallback → 0ms, 100% accurate
+                ├→ Local Model Execution → ~1-2s, free
+                ├→ Recursive Decomposition → partial local + cloud
+                └→ Cloud API Call → pay-per-use
+                      │
+                      ▼
+                Distillation Loop
+                ├→ QualityEvaluator 5-dimension assessment
+                ├→ FailureClusterer failure pattern clustering
+                └→ State progression hypothesis → supported/contested
 ```
 
-**Key:** Every cloud call "trains" the local model, making the system smarter over time.
+---
+
+## Three-Layer Decision Fusion
+
+### Layer 1: Confidence-Gated Cascade
+
+Extract confidence signals from token-level logprobs, calibrate via Pool Adjacent Violators (PAV) algorithm, auto-escalate to cloud when below threshold.
+
+### Layer 2: Meta-Learner Global Decision
+
+Online Logistic Regression with 10-dimensional feature vector unifying all routing signals.
+
+### Layer 3: Active Learning
+
+Track prediction variance per task type, request cloud verification for uncertain types. Cold-start protection: no verification until 5+ samples.
 
 ---
 
@@ -460,191 +509,15 @@ sma --task "translate to Chinese" --text "Hello World"
 # 4. View cumulative savings
 sma --stats
 
-# 5. Start Web dashboard
+# 5. View three-layer decision status
+sma --cascade        # Confidence cascade stats
+sma --meta           # Meta-Learner feature weights
+sma --active         # Active learning uncertainty
+
+# 6. Start Web dashboard
 python3 scripts/api_server.py --port 8930
 # Visit http://localhost:8930
 ```
-
----
-
-## Chinese Enterprise Scenarios
-
-6 built-in Chinese enterprise templates, ready to use:
-
-| Scenario | Command Example | Route |
-|----------|----------------|-------|
-| Contract clause extraction | `sma --task "合同条款提取" --text "..."` | Local |
-| Invoice parsing | `sma --task "发票信息提取" --text "..."` | Local |
-| Meeting minutes | `sma --task "会议纪要整理" --text "..."` | Local/Cloud |
-| Customer feedback classification | `sma --task "客户反馈分类" --text "..."` | Local |
-| Data report analysis | `sma --task "数据分析报告" --text "..."` | Cloud |
-| Product categorization | `sma --task "分类并统计" --text "..."` | Hybrid |
-
----
-
-## Data Privacy Protection
-
-Automatically detects and anonymizes sensitive information before sending to cloud:
-
-```python
-from scripts.privacy import PrivacyFilter
-
-pf = PrivacyFilter()
-result = pf.anonymize("Contact 13812345678 or test@example.com")
-# → "Contact [Phone]_0 or [Email]_0"
-
-original = pf.deanonymize(result.text)
-# → "Contact 13812345678 or test@example.com"
-```
-
-Supports detection: phone numbers, ID cards, emails, bank cards, IP addresses, passport numbers.
-
----
-
-## API Service
-
-```bash
-python3 scripts/api_server.py --port 8930
-```
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/task | Execute single task |
-| POST | /api/estimate | Estimate routing |
-| POST | /api/decompose | Decompose complex task |
-| POST | /api/batch | Batch processing (concurrent) |
-| POST | /v1/chat/completions | OpenAI-compatible API |
-| GET | /api/stats | Usage statistics |
-| GET | /api/models | Model list |
-| GET | /api/audit | Audit logs |
-| GET | / | Web dashboard |
-
----
-
-## Learning Loop Visualization
-
-View how the system evolves over time:
-
-```bash
-python3 scripts/learning_viz.py           # Full report
-python3 scripts/learning_viz.py --days 7  # Last 7 days
-python3 scripts/learning_viz.py --json    # JSON format
-```
-
----
-
-## Model Management
-
-```bash
-# View installed models and capability scores
-sma --models
-
-# Run benchmark
-sma --benchmark qwen-tool:latest
-
-# Quality evaluation
-python3 scripts/quality_eval.py --eval qwen-tool:latest
-python3 scripts/quality_eval.py --ab model_a model_b
-```
-
----
-
-## Distillation System
-
-```bash
-# Judge pending training pairs
-sma --distill
-
-# View distillation health
-sma --distill-stats
-
-# Export trainable data
-sma --distill-export
-```
-
-Distillation flow: Cloud response → Judge → SUPPORTED/CONTESTED → Extract few-shot → Inject into prompt → Local model improves.
-
----
-
-## Semantic Cache
-
-Duplicate tasks automatically hit cache with three-level matching:
-
-1. **exact** — Exact match
-2. **normalized** — Strip spaces, unify punctuation
-3. **fuzzy** — Trigram Jaccard similarity (threshold 0.85)
-
-Different task types use different TTLs: translation/classification 7 days, extraction 3 days, summarization 1 day.
-
----
-
-## Technical Architecture
-
-### A3M Multi-signal Routing
-
-```
-Complexity Score = Verb Intensity×3 + Multi-step Penalty + Domain Complexity + Text Length + File Count + Local Pattern Bonus
-
-Verb Intensity: design+0.25, analyze+0.15, classify-0.15, extract-0.10 ...
-Multi-step Detection: "and", "then", "first...then...", numbered lists
-Domain Detection: finance/legal/medical/algorithm +0.5
-```
-
-### Cloud Retry + Circuit Breaker
-
-```
-Failure → Retry 2x (exponential backoff) → 3 consecutive failures → Circuit break 120s → Preserve local output during break
-```
-
-### Output Validation + Fallback
-
-```
-Local execution → Validate quality → Fail → Auto-fallback to cloud → Collect correction pair for distillation
-```
-
----
-
-## Command Reference
-
-| Command | Description |
-|---------|-------------|
-| `sma --task "..." --text "..."` | Single task execution |
-| `sma --task "..." --force local` | Force local |
-| `sma --decompose "big task"` | Decompose task |
-| `sma --estimate "..."` | Estimate routing |
-| `sma --batch tasks.json` | Batch execution |
-| `sma --batch tasks.json --concurrency 3` | Concurrent batch |
-| `sma --stats` | Usage statistics |
-| `sma --models` | Model list |
-| `sma --benchmark [model]` | Benchmark |
-| `sma --distill` | Distillation judge |
-| `sma --distill-stats` | Distillation status |
-| `sma --weights` | View A3M learnable weights |
-| `sma --weights-reset` | Reset A3M weights to defaults |
-| `sma -i` | Interactive mode |
-
----
-
-## Configure Cloud API
-
-```bash
-# DeepSeek (recommended, cost-effective)
-export CLOUD_API_URL="https://api.deepseek.com"
-export CLOUD_API_KEY="sk-xxxxxxxx"
-export CLOUD_MODEL="deepseek-chat"
-
-# Claude
-export CLOUD_API_URL="https://api.anthropic.com"
-export CLOUD_API_KEY="sk-ant-xxxxxxxx"
-export CLOUD_MODEL="claude-sonnet-4-6"
-
-# OpenAI
-export CLOUD_API_URL="https://api.openai.com"
-export CLOUD_API_KEY="sk-xxxxxxxx"
-export CLOUD_MODEL="gpt-4o"
-```
-
-When not configured, cloud subtasks are skipped, local subtasks execute normally.
 
 ---
 
