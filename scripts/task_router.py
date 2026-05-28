@@ -44,6 +44,7 @@ from confidence import extract_confidence, extract_confidence_from_text, Cascade
 from meta_learner import extract_routing_features, get_meta_learner, get_active_learner
 from tqbc import TQBCRouter
 from outcome_cache import OutcomeAwareCache
+from conformal_routing import ConformalizedRouter
 
 # ─── 全局实例（延迟初始化）──────────────────────────────────────
 
@@ -173,6 +174,17 @@ def get_outcome_cache():
     if _outcome_cache is None:
         _outcome_cache = OutcomeAwareCache(CONFIG.cache_dir)
     return _outcome_cache
+
+
+# Conformalized Router（不确定性量化路由）
+_conformal = None
+
+
+def get_conformal_router():
+    global _conformal
+    if _conformal is None:
+        _conformal = ConformalizedRouter(CONFIG.cache_dir)
+    return _conformal
 
 
 # ─── 预处理/后处理 ──────────────────────────────────────────────
@@ -539,12 +551,26 @@ def _run_local(task: Task) -> Task:
     # - ml_prediction: 基于全局特征的 P(本地成功)（原始信号）
     # - active_verify: 基于不确定性（原始信号）
     # - tqbc_decision: 基于 Token 分位数 + Thompson Sampling + 贝叶斯校准（创新信号）
-    should_escalate = (
+    raw_should_escalate = (
         cascade_decision["escalate"]
         or (not ml_prediction["should_use_local"] and ml_prediction["confidence"] > 0.5 and ml.get_stats()["total"] >= 50)
         or active_verify
         or tqbc_decision.should_escalate
     )
+
+    # 第五层：Conformalized Router（不确定性量化）
+    # 将点估计转换为带统计覆盖保证的预测集合
+    conformal = get_conformal_router()
+    conformal_decision = conformal.decide(
+        cascade_decision=cascade_decision,
+        tqbc_decision=tqbc_decision,
+        ml_prediction=ml_prediction,
+        active_verify=active_verify,
+        features=features,
+        task_type=task_type,
+        raw_should_escalate=raw_should_escalate,
+    )
+    should_escalate = conformal_decision.should_escalate
 
     def _record_and_return(escalated: bool, cloud_used: bool = False) -> None:
         """统一记录所有学习信号（避免提前 return 跳过学习）"""
@@ -554,6 +580,12 @@ def _run_local(task: Task) -> Task:
         al.record(task_type, ml_prediction["local_success_prob"], local_success)
         tqbc.record_outcome(
             decision=tqbc_decision,
+            success=local_success or cloud_used,
+            escalated=escalated,
+            task_type=task_type,
+        )
+        conformal.record_outcome(
+            decision=conformal_decision,
             success=local_success or cloud_used,
             escalated=escalated,
             task_type=task_type,
