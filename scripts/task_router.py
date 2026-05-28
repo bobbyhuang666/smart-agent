@@ -346,6 +346,7 @@ def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
     result = call_ollama(prompt, model=selected_model, max_tokens=max_tokens, with_logprobs=True)
 
     # 提取置信度信号
+    result["strategy"] = strategy
     from confidence import extract_confidence, extract_confidence_from_text
     logprobs = result.get("logprobs", [])
     if logprobs:
@@ -415,7 +416,27 @@ def _run_local(task: Task) -> Task:
     conf_data = result.get("confidence", {})
     cascade_decision = cascade.should_escalate(conf_data)
 
-    if cascade_decision["escalate"] and CONFIG.cloud_api_key:
+    # Meta-Learner：统一所有信号做全局决策
+    from meta_learner import extract_routing_features, get_meta_learner, get_active_learner
+    ml = get_meta_learner()
+    al = get_active_learner()
+    routing_decision = estimate_complexity(task)
+    cap = TASK_TO_CAPABILITY.get(task_type, "")
+    cap_success = cap_tracker.get_success_rate(cap) if cap else 0.5
+    features = extract_routing_features(
+        complexity_score=routing_decision["score"],
+        confidence_data=conf_data,
+        text_length=len(clean_text),
+        file_count=len(task.files),
+        capability_success_rate=cap_success,
+        strategy=result.get("strategy", "direct"),
+    )
+    ml_prediction = ml.predict(features)
+
+    # 主动学习：不确定的任务类型请求云端验证
+    active_verify = al.should_request_verification(task_type) and CONFIG.cloud_api_key
+
+    if (cascade_decision["escalate"] or active_verify) and CONFIG.cloud_api_key:
         # 置信度不足 → 升级到云端
         cloud_result = call_cloud_api(task.action, task.text)
         if not cloud_result.get("circuit_open"):
@@ -448,6 +469,12 @@ def _run_local(task: Task) -> Task:
     else:
         # 本地输出通过验证或云端不可用
         cascade.record_outcome(conf_data, was_correct=True, escalated=cascade_escalated)
+
+    # Meta-Learner 学习 + 主动学习记录
+    local_success = task.route != "cloud_fallback" and task.route != "error"
+    ml.record_and_learn(features, success=local_success, route=task.route, task_type=task_type)
+    al.record(task_type, ml_prediction["local_success_prob"], local_success)
+
     return task
 
 

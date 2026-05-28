@@ -40,6 +40,8 @@ def main() -> None:
     parser.add_argument("--weights", action="store_true", help="查看 A3M 权重状态")
     parser.add_argument("--weights-reset", action="store_true", help="重置 A3M 权重")
     parser.add_argument("--cascade", action="store_true", help="置信度级联统计")
+    parser.add_argument("--meta", action="store_true", help="Meta-Learner 统计")
+    parser.add_argument("--active", action="store_true", help="主动学习统计")
     args = parser.parse_args()
 
     if args.stats:
@@ -81,6 +83,33 @@ def main() -> None:
         cal = stats.get('calibration', {})
         print(f"  校准状态: {'已校准' if cal.get('is_calibrated') else '未校准（需 ≥20 个样本）'}")
         print(f"  校准样本数: {cal.get('total_samples', 0)}")
+        return
+
+    if args.meta:
+        from meta_learner import get_meta_learner
+        ml = get_meta_learner()
+        stats = ml.get_stats()
+        print("Meta-Learner 统一决策器")
+        print(f"  训练样本: {stats['total']}")
+        print(f"  预测准确率: {stats['accuracy']:.0%}")
+        print("\n  特征权重:")
+        for name, weight in sorted(stats["feature_importance"].items(), key=lambda x: abs(x[1]), reverse=True):
+            bar = "+" * int(abs(weight) * 10) if weight > 0 else "-" * int(abs(weight) * 10)
+            print(f"    {name:20s} {weight:+.4f} {bar}")
+        return
+
+    if args.active:
+        from meta_learner import get_active_learner
+        al = get_active_learner()
+        stats = al.get_stats()
+        print("主动学习（不确定性采样）")
+        print(f"  任务类型数: {stats['total_task_types']}")
+        print(f"  总记录数: {stats['total_records']}")
+        if stats["most_uncertain"]:
+            print("\n  最不确定的任务类型:")
+            for item in stats["most_uncertain"]:
+                print(f"    {item['task_type']:20s} 不确定性={item['uncertainty']:.3f} "
+                      f"样本={item['sample_count']} 准确率={item['recent_accuracy']:.0%}")
         return
 
     if args.models:
