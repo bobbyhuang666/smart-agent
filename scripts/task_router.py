@@ -36,6 +36,15 @@ from distillation import (
     get_dynamic_examples,
 )
 from io_utils import read_jsonl, append_jsonl
+from reasoning import (
+    select_strategy, select_reasoning_strategy, enhance_prompt_with_strategy,
+    STRATEGY_TOKEN_MULTIPLIER, TOKEN_BUDGET, get_strategy_tracker,
+)
+from adaptive_compression import compress_adaptive
+from confidence import extract_confidence, extract_confidence_from_text, CascadeDecision
+from meta_learner import extract_routing_features, MetaLearner, ActiveLearner, get_meta_learner, get_active_learner
+from tqbc import TQBCRouter
+from outcome_cache import OutcomeAwareCache
 
 # ─── 全局实例（延迟初始化）──────────────────────────────────────
 
@@ -141,9 +150,30 @@ _cascade = None
 def get_cascade():
     global _cascade
     if _cascade is None:
-        from confidence import CascadeDecision
         _cascade = CascadeDecision(CONFIG.cache_dir)
     return _cascade
+
+
+# TQBC（Token-Quantile Bayesian Cascade）路由
+_tqbc = None
+
+
+def get_tqbc():
+    global _tqbc
+    if _tqbc is None:
+        _tqbc = TQBCRouter(CONFIG.cache_dir)
+    return _tqbc
+
+
+# 结果感知缓存（OATS-Inspired Quality Cache）
+_outcome_cache = None
+
+
+def get_outcome_cache():
+    global _outcome_cache
+    if _outcome_cache is None:
+        _outcome_cache = OutcomeAwareCache(CONFIG.cache_dir)
+    return _outcome_cache
 
 
 # ─── 预处理/后处理 ──────────────────────────────────────────────
@@ -247,10 +277,20 @@ def auto_collect_on_local_failure(task: Task, local_output: str, cloud_output: s
 # ─── 核心执行（拆分为子函数）────────────────────────────────────
 
 def _check_cache(task: Task) -> Optional[Task]:
-    """检查语义缓存，命中则返回填充好的 Task，否则返回 None"""
+    """检查语义缓存（含质量感知），命中则返回填充好的 Task，否则返回 None"""
     cached = cache.get(task.action, task.text)
     if not cached:
         return None
+
+    # OATS-Inspired 质量感知：检查缓存条目历史质量
+    cache_key = cache._make_key(task.action, task.text)
+    outcome_cache = get_outcome_cache()
+    quality = outcome_cache.get_quality(cache_key)
+    if quality < 0.2:
+        # 极低质量的缓存条目，跳过（触发正常管道）
+        log.debug("缓存质量过低 (%.2f)，跳过: %s", quality, cache_key[:30])
+        return None
+
     task.output = cached.get("result", {}).get("text", cached.get("output", ""))
     task.route = f"cache({cached.get('match_type', 'hit')})"
     task.model_used = "cache"
@@ -321,26 +361,54 @@ def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
     prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
     prompt = enrich_prompt_with_examples(prompt, task_type, clean_text)
 
-    # 推理路径路由：根据复杂度选择最优推理策略
-    from reasoning import select_reasoning_strategy, enhance_prompt_with_strategy, STRATEGY_TOKEN_MULTIPLIER
+    # 推理策略选择：统一入口（关键词 + Token 分位数 + 历史反馈）
     routing_result = estimate_complexity(task)
-    strategy_decision = select_reasoning_strategy(
-        clean_action, clean_text, routing_result["score"], task_type,
-    )
-    strategy = strategy_decision.strategy
-    # 如果有蒸馏示例，用 few_shot 策略
     examples_str = ""
-    if strategy != "direct" and task_type:
+    has_examples = False
+    if task_type:
         examples = get_dynamic_examples(task_type, store, limit=2)
         if examples:
-            strategy = "few_shot"
+            has_examples = True
             examples_str = "\n".join(
                 f"{e.get('prompt', '')[:50]} → {e.get('response', '')[:50]}"
                 for e in examples
             )
+
+    # 第一次选择：用关键词 + 复杂度（模型调用前没有 logprobs）
+    strategy_decision = select_strategy(
+        action=clean_action,
+        text=clean_text,
+        complexity_score=routing_result["score"],
+        task_type=task_type,
+        logprobs=None,  # 调用前没有 logprobs
+        has_examples=has_examples,
+    )
+    strategy = strategy_decision.strategy
+
+    # 策略反馈优化：利用历史数据选择最优策略
+    tracker = get_strategy_tracker()
+    historical_best = tracker.get_best_strategy(task_type)
+    if historical_best and historical_best != strategy:
+        log.debug("策略反馈优化: %s → %s (历史数据)", strategy, historical_best)
+        strategy = historical_best
+
+    # 蒸馏示例 → few_shot
+    if has_examples and strategy != "direct":
+        strategy = "few_shot"
+
     prompt = enhance_prompt_with_strategy(prompt, strategy, examples_str)
 
-    prompt = compress_prompt_tokens(prompt, task_type)
+    # 自适应 Prompt 压缩：根据策略预估置信度选择压缩级别
+    strategy_confidence_map = {
+        "direct": 0.85, "cod": 0.65, "cot": 0.5, "few_shot": 0.6, "structured": 0.45,
+    }
+    estimated_conf = strategy_confidence_map.get(strategy, 0.5)
+    compression_result = compress_adaptive(prompt, confidence=estimated_conf, task_type=task_type)
+    prompt = compression_result.compressed_prompt
+    if compression_result.level != "none":
+        log.debug("Prompt 压缩: %s 级别, %.0f%% 保留", compression_result.level,
+                  compression_result.compression_ratio * 100)
+
     max_tokens = int(get_max_tokens(task_type) * STRATEGY_TOKEN_MULTIPLIER.get(strategy, 1.0))
 
     # 请求 logprobs 用于置信度提取
@@ -348,13 +416,33 @@ def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
 
     # 提取置信度信号
     result["strategy"] = strategy
-    from confidence import extract_confidence, extract_confidence_from_text
     logprobs = result.get("logprobs", [])
     if logprobs:
         result["confidence"] = extract_confidence(logprobs)
     else:
         # Ollama 不支持 logprobs 时降级到启发式
         result["confidence"] = extract_confidence_from_text(result["text"])
+
+    # 模型调用后重新评估：用 Token 分位数特征选择最优策略
+    adaptive_decision = select_strategy(
+        action=clean_action,
+        text=clean_text,
+        complexity_score=routing_result["score"],
+        task_type=task_type,
+        logprobs=logprobs,  # 现在有 logprobs 了
+        has_examples=has_examples,
+    )
+    result["adaptive_strategy"] = adaptive_decision.strategy
+    result["adaptive_confidence"] = adaptive_decision.confidence_signal
+    result["token_budget_factor"] = adaptive_decision.token_budget_factor
+
+    # Token 预算优化评估：记录实际 vs 最优 token 使用
+    optimal_budget = TOKEN_BUDGET.get(adaptive_decision.strategy, 1.0)
+    current_budget = STRATEGY_TOKEN_MULTIPLIER.get(strategy, 1.0)
+    if optimal_budget < current_budget * 0.5:
+        log.info("Token 预算优化机会: 策略 %s (预算 %.1fx) → %s (预算 %.1fx), 节省 %.0f%%",
+                 strategy, current_budget, adaptive_decision.strategy, optimal_budget,
+                 (1 - optimal_budget / current_budget) * 100)
 
     task.output = postprocess_output(result["text"], task_type)
     task.model_used = selected_model or CONFIG.local_model
@@ -412,13 +500,12 @@ def _run_local(task: Task) -> Task:
     if task.model_used == "rule_engine":
         return task
 
-    # ── 三层决策：Cascade + Meta-Learner + Active Learner ──
+    # ── 四层决策：Cascade + Meta-Learner + Active Learner + TQBC ──
     cascade = get_cascade()
     conf_data = result.get("confidence", {})
     cascade_decision = cascade.should_escalate(conf_data)
 
     # Meta-Learner：统一所有信号做全局决策
-    from meta_learner import extract_routing_features, get_meta_learner, get_active_learner
     ml = get_meta_learner()
     al = get_active_learner()
     routing_decision = estimate_complexity(task)
@@ -437,14 +524,27 @@ def _run_local(task: Task) -> Task:
     # 主动学习：不确定的任务类型请求云端验证（带冷启动保护）
     active_verify = al.should_request_verification(task_type, min_samples=5) and CONFIG.cloud_api_key
 
-    # 决策融合：三个信号投票
-    # - cascade: 基于置信度阈值
-    # - ml_prediction: 基于全局特征的 P(本地成功)
-    # - active_verify: 基于不确定性
+    # TQBC：Token-Quantile Bayesian Cascade（第四层创新信号）
+    tqbc = get_tqbc()
+    logprobs = result.get("logprobs", [])
+    tqbc_decision = tqbc.decide(
+        logprobs=logprobs,
+        complexity_score=routing_decision["score"],
+        task_type=task_type,
+        text_length=len(clean_text),
+        capability_success_rate=cap_success,
+    )
+
+    # 决策融合：四个信号投票
+    # - cascade: 基于置信度阈值（原始信号）
+    # - ml_prediction: 基于全局特征的 P(本地成功)（原始信号）
+    # - active_verify: 基于不确定性（原始信号）
+    # - tqbc_decision: 基于 Token 分位数 + Thompson Sampling + 贝叶斯校准（创新信号）
     should_escalate = (
         cascade_decision["escalate"]
         or (not ml_prediction["should_use_local"] and ml_prediction["confidence"] > 0.5 and ml.get_stats()["total"] >= 50)
         or active_verify
+        or tqbc_decision.should_escalate
     )
 
     def _record_and_return(escalated: bool, cloud_used: bool = False) -> None:
@@ -453,6 +553,21 @@ def _run_local(task: Task) -> Task:
         cascade.record_outcome(conf_data, was_correct=local_success or cloud_used, escalated=escalated)
         ml.record_and_learn(features, success=local_success, route=task.route, task_type=task_type)
         al.record(task_type, ml_prediction["local_success_prob"], local_success)
+        tqbc.record_outcome(
+            decision=tqbc_decision,
+            success=local_success or cloud_used,
+            escalated=escalated,
+            task_type=task_type,
+        )
+
+        # 策略反馈记录：追踪推理策略效果
+        used_strategy = result.get("strategy", "direct")
+        get_strategy_tracker().record(used_strategy, task_type, local_success or cloud_used)
+
+        # 结果感知缓存反馈：更新缓存条目质量分
+        if task.model_used == "cache":
+            cache_key = cache._make_key(task.action, task.text)
+            get_outcome_cache().record_outcome(cache_key, success=local_success or cloud_used)
 
     if should_escalate and CONFIG.cloud_api_key:
         cloud_result = call_cloud_api(task.action, task.text)
