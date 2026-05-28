@@ -13,6 +13,7 @@
 import os
 import json
 import time
+import threading
 import logging
 from dataclasses import dataclass, asdict, field
 from collections import defaultdict
@@ -50,6 +51,7 @@ class ApiKeyConfig:
     key: str                          # API Key 值
     team: str = "default"             # 团队名称
     description: str = ""             # 描述
+    role: str = "user"                # 角色: admin / user / readonly
     enabled: bool = True              # 是否启用
     monthly_task_limit: int = 10000   # 每月任务数上限
     monthly_token_limit: int = 1000000  # 每月 token 上限
@@ -67,6 +69,8 @@ class ApiKeyManager:
         self.keys_file = os.path.join(self.cache_dir, "api_keys.json")
         os.makedirs(self.cache_dir, exist_ok=True)
         self.keys: dict[str, ApiKeyConfig] = {}
+        self._lock = threading.RLock()
+        self._dirty = False
         self._load_keys()
 
     def _load_keys(self):
@@ -81,11 +85,19 @@ class ApiKeyManager:
             pass
 
     def _save_keys(self):
-        data = {k: asdict(v) for k, v in self.keys.items()}
-        with open(self.keys_file, "w") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with self._lock:
+            data = {k: asdict(v) for k, v in self.keys.items()}
+            with open(self.keys_file, "w") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._dirty = False
+
+    def flush(self):
+        """将内存中的变更写入磁盘（定期调用）"""
+        if self._dirty:
+            self._save_keys()
 
     def add_key(self, key: str, team: str, description: str = "",
+                role: str = "user",
                 monthly_task_limit: int = 10000,
                 monthly_token_limit: int = 1000000,
                 monthly_cost_limit: float = 100.0,
@@ -95,48 +107,55 @@ class ApiKeyManager:
             key=key,
             team=team,
             description=description,
+            role=role,
             monthly_task_limit=monthly_task_limit,
             monthly_token_limit=monthly_token_limit,
             monthly_cost_limit=monthly_cost_limit,
             allowed_models=allowed_models or [],
             created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
-        self.keys[key] = config
+        with self._lock:
+            self.keys[key] = config
         self._save_keys()
         return config
 
     def remove_key(self, key: str) -> bool:
         """删除 API Key"""
-        if key in self.keys:
-            del self.keys[key]
-            self._save_keys()
-            return True
+        with self._lock:
+            if key in self.keys:
+                del self.keys[key]
+                self._save_keys()
+                return True
         return False
 
     def enable_key(self, key: str, enabled: bool = True) -> bool:
         """启用/禁用 API Key"""
-        if key in self.keys:
-            self.keys[key].enabled = enabled
-            self._save_keys()
-            return True
+        with self._lock:
+            if key in self.keys:
+                self.keys[key].enabled = enabled
+                self._save_keys()
+                return True
         return False
 
     def authenticate(self, key: str) -> ApiKeyConfig | None:
-        """验证 API Key，返回配置或 None"""
+        """验证 API Key，返回配置或 None（只更新内存，不写磁盘）"""
         config = self.keys.get(key)
         if config and config.enabled:
-            # 更新最后使用时间
             config.last_used_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-            self._save_keys()
+            self._dirty = True
             return config
         return None
+
+    def is_admin(self, key: str) -> bool:
+        """检查 Key 是否为管理员角色"""
+        config = self.keys.get(key)
+        return config is not None and config.enabled and config.role == "admin"
 
     def check_model_access(self, key: str, model: str) -> bool:
         """检查 Key 是否有权限使用指定模型"""
         config = self.keys.get(key)
         if not config or not config.enabled:
             return False
-        # 空列表 = 允许所有模型
         if not config.allowed_models:
             return True
         return model in config.allowed_models
@@ -150,6 +169,7 @@ class ApiKeyManager:
             "key_prefix": key[:8] + "..." if len(key) > 8 else key,
             "team": config.team,
             "description": config.description,
+            "role": config.role,
             "enabled": config.enabled,
             "monthly_task_limit": config.monthly_task_limit,
             "monthly_token_limit": config.monthly_token_limit,
@@ -184,7 +204,7 @@ class QuotaConfig:
 
 
 class QuotaManager:
-    """配额管理器"""
+    """配额管理器（线程安全 + 内存计数器优化）"""
 
     def __init__(self, cache_dir: str = None):
         self.cache_dir = cache_dir or get_config().cache_dir
@@ -192,7 +212,11 @@ class QuotaManager:
         self.usage_file = os.path.join(self.cache_dir, "quota_usage.jsonl")
         os.makedirs(self.cache_dir, exist_ok=True)
         self.quotas: dict[str, QuotaConfig] = {}
+        self._lock = threading.Lock()
+        # 内存计数器：{user_id: {date: {tasks, tokens, cost}}}
+        self._counters: dict[str, dict[str, dict]] = {}
         self._load_quotas()
+        self._load_today_counters()
 
     def _load_quotas(self):
         if not os.path.exists(self.quotas_file):
@@ -206,18 +230,52 @@ class QuotaManager:
             pass
 
     def _save_quotas(self):
-        data = {uid: asdict(q) for uid, q in self.quotas.items()}
-        with open(self.quotas_file, "w") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with self._lock:
+            data = {uid: asdict(q) for uid, q in self.quotas.items()}
+            with open(self.quotas_file, "w") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load_today_counters(self):
+        """启动时加载今日计数器（避免全表扫描）"""
+        today = time.strftime("%Y-%m-%d")
+        if not os.path.exists(self.usage_file):
+            return
+        try:
+            with open(self.usage_file) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+                        if entry.get("date") == today:
+                            uid = entry.get("user_id", "")
+                            if uid:
+                                if uid not in self._counters:
+                                    self._counters[uid] = {}
+                                if today not in self._counters[uid]:
+                                    self._counters[uid][today] = {"tasks": 0, "tokens": 0, "cost": 0.0}
+                                self._counters[uid][today]["tasks"] += 1
+                                self._counters[uid][today]["tokens"] += entry.get("tokens", 0)
+                                self._counters[uid][today]["cost"] += entry.get("cost", 0.0)
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except OSError:
+            pass
+
+    def _get_today_usage(self, user_id: str) -> dict:
+        """获取今日使用量（从内存计数器）"""
+        today = time.strftime("%Y-%m-%d")
+        if user_id in self._counters and today in self._counters[user_id]:
+            return self._counters[user_id][today]
+        return {"tasks": 0, "tokens": 0, "cost": 0.0}
 
     def set_quota(self, user_id: str, **kwargs):
         """设置用户配额"""
-        if user_id in self.quotas:
-            for k, v in kwargs.items():
-                if hasattr(self.quotas[user_id], k):
-                    setattr(self.quotas[user_id], k, v)
-        else:
-            self.quotas[user_id] = QuotaConfig(user_id=user_id, **kwargs)
+        with self._lock:
+            if user_id in self.quotas:
+                for k, v in kwargs.items():
+                    if hasattr(self.quotas[user_id], k):
+                        setattr(self.quotas[user_id], k, v)
+            else:
+                self.quotas[user_id] = QuotaConfig(user_id=user_id, **kwargs)
         self._save_quotas()
 
     def get_quota(self, user_id: str) -> QuotaConfig:
@@ -226,39 +284,15 @@ class QuotaManager:
 
     def check_quota(self, user_id: str) -> dict:
         """
-        检查用户配额状态。
-
-        返回:
-            {
-                "allowed": bool,
-                "reason": str,
-                "daily_tasks_used": int,
-                "daily_tasks_limit": int,
-                "daily_tokens_used": int,
-                "daily_tokens_limit": int,
-            }
+        检查用户配额状态（使用内存计数器，O(1) 性能）。
         """
         quota = self.get_quota(user_id)
-        today = time.strftime("%Y-%m-%d")
+        usage = self._get_today_usage(user_id)
 
-        # 统计今日使用量
-        daily_tasks = 0
-        daily_tokens = 0
-        daily_cost = 0.0
+        daily_tasks = usage["tasks"]
+        daily_tokens = usage["tokens"]
+        daily_cost = usage["cost"]
 
-        if os.path.exists(self.usage_file):
-            with open(self.usage_file) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line.strip())
-                        if entry.get("user_id") == user_id and entry.get("date") == today:
-                            daily_tasks += 1
-                            daily_tokens += entry.get("tokens", 0)
-                            daily_cost += entry.get("cost", 0.0)
-                    except (json.JSONDecodeError, KeyError):
-                        continue
-
-        # 检查限制
         if daily_tasks >= quota.daily_task_limit:
             return {
                 "allowed": False,
@@ -300,17 +334,30 @@ class QuotaManager:
 
     def record_usage(self, user_id: str, tokens: int = 0, cost: float = 0.0,
                      action: str = ""):
-        """记录使用量"""
+        """记录使用量（同时更新内存计数器和磁盘）"""
+        today = time.strftime("%Y-%m-%d")
+        # 更新内存计数器
+        with self._lock:
+            if user_id not in self._counters:
+                self._counters[user_id] = {}
+            if today not in self._counters[user_id]:
+                self._counters[user_id][today] = {"tasks": 0, "tokens": 0, "cost": 0.0}
+            self._counters[user_id][today]["tasks"] += 1
+            self._counters[user_id][today]["tokens"] += tokens
+            self._counters[user_id][today]["cost"] += cost
+
+        # 写入磁盘
         entry = {
             "user_id": user_id,
-            "date": time.strftime("%Y-%m-%d"),
+            "date": today,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "tokens": tokens,
             "cost": cost,
             "action": action[:100],
         }
-        with open(self.usage_file, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with self._lock:
+            with open(self.usage_file, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def get_usage_summary(self, user_id: str) -> dict:
         """获取用户使用量摘要（含百分比）"""

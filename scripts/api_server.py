@@ -167,7 +167,7 @@ class TaskRouterHandler:
     # ─── API 端点 ─────────────────────────────────────────────
 
     async def _api_task(self, request: web.Request) -> web.Response:
-        """执行单个任务"""
+        """执行单个任务（含配额检查 + 模型访问控制）"""
         body = await request.json()
         action = body.get("action", body.get("prompt", ""))
         text = body.get("text", body.get("input", ""))
@@ -177,10 +177,28 @@ class TaskRouterHandler:
         if not action:
             return web.json_response({"error": "缺少 action 参数"}, status=400)
 
+        # 配额检查
+        team = getattr(request, "team", "") or "default"
+        qm = get_quota_manager()
+        quota = qm.check_quota(team)
+        if not quota["allowed"]:
+            return web.json_response({"error": quota["reason"], "quota": quota}, status=429)
+
         task = Task(action=action, text=text, files=files)
         start = time.time()
         result = await asyncio.to_thread(run_task, task, force_route=force)
         elapsed = int((time.time() - start) * 1000)
+
+        # 模型访问控制
+        key_config = request.get("api_key_config")
+        if key_config:
+            akm = get_api_key_manager()
+            if not akm.check_model_access(key_config.key, result.model_used):
+                return web.json_response({"error": f"无权使用模型: {result.model_used}"}, status=403)
+
+        # 记录用量
+        total_tokens = result.tokens_input + result.tokens_output
+        qm.record_usage(team, tokens=total_tokens, cost=result.cost_saved, action=action[:50])
 
         log.info("任务完成: route=%s model=%s time=%dms action=%s",
                  result.route, result.model_used, elapsed, action[:50])
@@ -218,19 +236,36 @@ class TaskRouterHandler:
             subtasks = _recursive_decompose(action, text) or []
         return web.json_response({"task": action, "subtasks": subtasks})
 
+    MAX_BATCH_SIZE = 100
+
     async def _api_batch(self, request: web.Request) -> web.Response:
-        """批量任务处理"""
+        """批量任务处理（含批量限制 + 配额检查）"""
         body = await request.json()
         tasks = body.get("tasks", [])
         concurrency = body.get("concurrency", 1)
         if not tasks:
             return web.json_response({"error": "缺少 tasks 数组"}, status=400)
 
+        # 批量大小限制
+        if len(tasks) > self.MAX_BATCH_SIZE:
+            return web.json_response(
+                {"error": f"批量上限 {self.MAX_BATCH_SIZE} 个任务，当前 {len(tasks)} 个"},
+                status=400,
+            )
+
+        # 配额检查
+        team = getattr(request, "team", "") or "default"
+        qm = get_quota_manager()
+        quota = qm.check_quota(team)
+        if not quota["allowed"]:
+            return web.json_response({"error": quota["reason"], "quota": quota}, status=429)
+
         start = time.time()
         results = await asyncio.to_thread(run_batch, tasks, concurrency=concurrency)
         elapsed = int((time.time() - start) * 1000)
 
         output = []
+        total_tokens = 0
         for r in results:
             output.append({
                 "action": r.action[:100],
@@ -240,6 +275,11 @@ class TaskRouterHandler:
                 "time_ms": r.time_ms,
                 "cost_saved": r.cost_saved,
             })
+            total_tokens += r.tokens_input + r.tokens_output
+
+        # 记录用量
+        qm.record_usage(team, tokens=total_tokens, action=f"batch({len(tasks)})")
+
         return web.json_response({
             "results": output,
             "count": len(output),
@@ -319,8 +359,21 @@ class TaskRouterHandler:
         ak_manager = get_api_key_manager()
         return web.json_response({"keys": ak_manager.list_keys()})
 
+    @staticmethod
+    def _require_admin(request: web.Request) -> web.Response | None:
+        """检查管理员权限，无权限返回 403 响应，有权限返回 None"""
+        key_config = request.get("api_key_config")
+        if key_config and key_config.role != "admin":
+            return web.json_response({"error": "需要管理员权限"}, status=403)
+        # 兼容单 Key 模式：环境变量 Key 拥有管理员权限
+        return None
+
     async def _api_add_key(self, request: web.Request) -> web.Response:
-        """添加新的 API Key"""
+        """添加新的 API Key（需要管理员权限）"""
+        deny = self._require_admin(request)
+        if deny:
+            return deny
+
         body = await request.json()
         key = body.get("key", "")
         team = body.get("team", "default")
@@ -332,6 +385,7 @@ class TaskRouterHandler:
             key=key,
             team=team,
             description=body.get("description", ""),
+            role=body.get("role", "user"),
             monthly_task_limit=body.get("monthly_task_limit", 10000),
             monthly_token_limit=body.get("monthly_token_limit", 1000000),
             monthly_cost_limit=body.get("monthly_cost_limit", 100.0),
@@ -340,7 +394,11 @@ class TaskRouterHandler:
         return web.json_response({"status": "created", "key_prefix": key[:8] + "...", "team": team})
 
     async def _api_remove_key(self, request: web.Request) -> web.Response:
-        """删除 API Key"""
+        """删除 API Key（需要管理员权限）"""
+        deny = self._require_admin(request)
+        if deny:
+            return deny
+
         key = request.match_info["key"]
         ak_manager = get_api_key_manager()
         if ak_manager.remove_key(key):
@@ -427,10 +485,32 @@ class TaskRouterHandler:
             action = text
             text = ""
 
+        # 配额检查
+        team = getattr(request, "team", "") or "default"
+        qm = get_quota_manager()
+        quota = qm.check_quota(team)
+        if not quota["allowed"]:
+            return web.json_response({
+                "error": {"message": quota["reason"], "type": "quota_exceeded", "code": "quota_exceeded"}
+            }, status=429)
+
         task = Task(action=action, text=text)
         start = time.time()
         result = await asyncio.to_thread(run_task, task)
         elapsed = time.time() - start
+
+        # 模型访问控制
+        key_config = request.get("api_key_config")
+        if key_config:
+            akm = get_api_key_manager()
+            if not akm.check_model_access(key_config.key, result.model_used):
+                return web.json_response({
+                    "error": {"message": f"无权使用模型: {result.model_used}", "type": "permission_denied"}
+                }, status=403)
+
+        # 记录用量
+        total_tokens = result.tokens_input + result.tokens_output
+        qm.record_usage(team, tokens=total_tokens, action=f"openai:{action[:50]}")
 
         log.info("OpenAI API: route=%s model=%s time=%.0fms", result.route, result.model_used, elapsed * 1000)
 
