@@ -42,7 +42,7 @@ from reasoning import (
 from adaptive_compression import compress_adaptive
 from confidence import extract_confidence, extract_confidence_from_text, CascadeDecision
 from meta_learner import extract_routing_features, get_meta_learner, get_active_learner
-from tqbc import TQBCRouter
+from tqbc import TQBCRouter, extract_quantile_features, TokenQuantileFeatures
 from outcome_cache import OutcomeAwareCache
 from conformal_routing import ConformalizedRouter
 
@@ -560,6 +560,8 @@ def _run_local(task: Task) -> Task:
 
     # 第五层：Conformalized Router（不确定性量化）
     # 将点估计转换为带统计覆盖保证的预测集合
+    # 使用原始 logprob 特征（不依赖在线学习），满足 exchangeability
+    quantile_features = extract_quantile_features(logprobs) if logprobs else TokenQuantileFeatures()
     conformal = get_conformal_router()
     conformal_decision = conformal.decide(
         cascade_decision=cascade_decision,
@@ -569,6 +571,7 @@ def _run_local(task: Task) -> Task:
         features=features,
         task_type=task_type,
         raw_should_escalate=raw_should_escalate,
+        quantile_features=quantile_features,
     )
     should_escalate = conformal_decision.should_escalate
 

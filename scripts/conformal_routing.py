@@ -316,6 +316,7 @@ class ConformalizedRouter:
         features: list[float],
         task_type: str,
         raw_should_escalate: bool,
+        quantile_features=None,
     ) -> ConformalDecision:
         """
         Conformalized 路由决策。
@@ -325,16 +326,19 @@ class ConformalizedRouter:
             tqbc_decision: TQBCDecision 输出
             ml_prediction: Meta-Learner 输出
             active_verify: Active Learner 是否请求验证
-            features: 特征向量
+            features: 特征向量（用于 distribution_shift）
             task_type: 任务类型
             raw_should_escalate: 前四层 OR 融合的原始决策
+            quantile_features: TokenQuantileFeatures 对象（原始 logprob 统计，
+                               不依赖在线学习，天然满足 exchangeability）
 
         返回:
             ConformalDecision
         """
-        # 1. 计算 nonconformity score
+        # 1. 计算 nonconformity score（使用原始 logprob 特征，不使用校准置信度）
         score = self._compute_nonconformity_score(
-            cascade_decision, tqbc_decision, ml_prediction, features)
+            cascade_decision, tqbc_decision, ml_prediction, features,
+            quantile_features=quantile_features)
 
         # 2. 获取当前 conformal threshold
         threshold = self.calibrator.get_threshold(self.aci.alpha)
@@ -342,8 +346,8 @@ class ConformalizedRouter:
         # 3. 构建预测集
         prediction_set = self._build_prediction_set(score, threshold, raw_should_escalate)
 
-        # 4. 计算置信区间
-        ci = self._compute_confidence_interval(score, threshold)
+        # 4. 计算置信区间（conformal-native：基于经验分布）
+        ci = self._compute_confidence_interval(score)
 
         # 5. 分解不确定性
         vote_entropy = self._compute_vote_entropy(
@@ -382,6 +386,7 @@ class ConformalizedRouter:
                 "uncertainty": getattr(tqbc_decision, 'uncertainty', 0.5),
             },
             "raw_fusion": raw_should_escalate,
+            "features": features,
         }
 
         # 构建原因
@@ -469,34 +474,45 @@ class ConformalizedRouter:
         tqbc_decision,
         ml_prediction: dict,
         features: list[float],
+        quantile_features=None,
     ) -> float:
         """
         计算 nonconformity score。
 
-        s(x) = 0.35 * (1 - tqbc_calibrated_conf)
-             + 0.25 * (1 - cascade_calibrated_conf)
-             + 0.25 * vote_entropy_normalized
-             + 0.15 * distribution_shift
+        使用原始 logprob 统计量（TokenQuantileFeatures），不使用校准置信度。
+        原始特征不依赖在线学习循环，天然满足 exchangeability 假设。
+
+        s(x) = 0.40 * s_entropy  (中位数熵，归一化到 [0,1])
+             + 0.30 * s_margin   (中位数边际，归一化到 [0,1])
+             + 0.15 * s_variance (熵方差，归一化到 [0,1])
+             + 0.15 * s_shift    (分布偏移)
         """
-        # s_cal: TQBC 贝叶斯校准置信度
-        tqbc_conf = getattr(tqbc_decision, 'calibrated_confidence', 0.5)
-        s_cal = 1.0 - tqbc_conf
+        if quantile_features is not None:
+            # 使用原始 logprob 特征（满足 exchangeability）
+            # q50_entropy: 典型 token 的不确定性，值越高越不确定
+            # 归一化：entropy 范围约 [0, ln(vocab_size)]，用 sigmoid 映射到 [0,1]
+            s_entropy = 1.0 / (1.0 + math.exp(-2.0 * (quantile_features.q50_entropy - 1.5)))
 
-        # s_cascade: PAV 等调回归校准置信度
-        cascade_conf = cascade_decision.get("calibrated_confidence", 0.5)
-        s_cascade = 1.0 - cascade_conf
+            # q50_margin: top-1 vs top-2 的概率差，值越小越不确定
+            # margin ∈ [0, 1]，直接用 1-margin
+            s_margin = 1.0 - max(0.0, min(1.0, quantile_features.q50_margin))
 
-        # s_entropy: 四层投票熵
-        vote_entropy = self._compute_vote_entropy(
-            cascade_decision, tqbc_decision, ml_prediction, False)
-        max_entropy = math.log(4)
-        s_entropy = vote_entropy / max_entropy if max_entropy > 0 else 0.0
+            # entropy_variance: 序列内一致性，值越高越不确定
+            s_variance = 1.0 / (1.0 + math.exp(-5.0 * (quantile_features.entropy_variance - 0.5)))
+        else:
+            # Fallback: 使用投票熵（不含校准置信度）
+            vote_entropy = self._compute_vote_entropy(
+                cascade_decision, tqbc_decision, ml_prediction, False)
+            max_entropy = math.log(4)
+            s_entropy = vote_entropy / max_entropy if max_entropy > 0 else 0.0
+            s_margin = 0.5  # 无数据时中性值
+            s_variance = 0.5
 
         # s_shift: 分布偏移
         s_shift = self.decomposer._compute_distribution_shift(features)
 
         # 加权组合
-        score = 0.35 * s_cal + 0.25 * s_cascade + 0.25 * s_entropy + 0.15 * s_shift
+        score = 0.40 * s_entropy + 0.30 * s_margin + 0.15 * s_variance + 0.15 * s_shift
         return max(0.0, min(1.0, score))
 
     def _build_prediction_set(self, score: float, threshold: float, raw_should_escalate: bool) -> list[str]:
@@ -514,31 +530,46 @@ class ConformalizedRouter:
             return ["local", "cloud"]
 
     def _compute_confidence_interval(
-        self, score: float, threshold: float
+        self, score: float
     ) -> tuple[float, float]:
         """
-        计算 P(local_success) 的置信区间。
+        计算置信区间（conformal-native 方法）。
 
-        区间宽度与 nonconformity score 和 threshold 的距离相关。
-        score 越接近 threshold，区间越宽（越不确定）。
+        使用滑动窗口中校准分数的经验分布构造 prediction interval，
+        而非 ad-hoc 公式。区间宽度由历史分数的分散程度决定。
+
+        lower = max(correct_scores) that are <= score
+        upper = min(incorrect_scores) that are > score
+        如果没有足够数据，回退到基于分位数的保守估计。
         """
-        if threshold <= 0:
-            return (0.0, 1.0)
+        correct_scores = self.calibrator.get_correct_scores()
 
-        # 归一化距离
-        distance = (threshold - score) / threshold  # 正值 = conforming, 负值 = nonconforming
+        if len(correct_scores) < 5:
+            # 数据不足：保守估计，宽区间
+            return (0.1, 0.9)
 
-        # 基础置信度（来自 score）
-        base_conf = 1.0 - score
+        # 正确分数中，score 排在什么位置
+        sorted_correct = sorted(correct_scores)
+        n = len(sorted_correct)
 
-        # 区间半宽：与距离成反比
-        # 距离大（很 conforming）→ 区间窄
-        # 距离小（接近 threshold）→ 区间宽
-        # 距离负（nonconforming）→ 区间很宽
-        half_width = 0.1 + 0.4 * max(0, 1.0 - abs(distance) * 3)
+        # score 在正确分数分布中的分位数位置
+        rank = sum(1 for s in sorted_correct if s <= score) / n
 
-        lower = max(0.0, base_conf - half_width)
-        upper = min(1.0, base_conf + half_width)
+        # 区间基于经验分布：
+        # rank 高（score 在正确分数中偏大）→ 置信度低
+        # rank 低（score 在正确分数中偏小）→ 置信度高
+        confidence = 1.0 - rank
+
+        # 区间宽度由正确分数的 IQR 决定
+        q25 = sorted_correct[max(0, n // 4)]
+        q75 = sorted_correct[min(n - 1, 3 * n // 4)]
+        iqr = q75 - q25
+
+        # 半宽 = IQR 的一半，乘以 (1 + rank) 使得接近阈值时更宽
+        half_width = max(0.05, min(0.4, 0.5 * iqr * (1.0 + rank)))
+
+        lower = max(0.0, confidence - half_width)
+        upper = min(1.0, confidence + half_width)
 
         return (round(lower, 4), round(upper, 4))
 

@@ -21,6 +21,14 @@ from conformal_routing import (
 )
 
 
+class MockQuantileFeatures:
+    """模拟 TokenQuantileFeatures（不依赖 tqbc 模块）"""
+    def __init__(self, q50_entropy=1.0, q50_margin=0.5, entropy_variance=0.3):
+        self.q50_entropy = q50_entropy
+        self.q50_margin = q50_margin
+        self.entropy_variance = entropy_variance
+
+
 # ─── 测试辅助 ──────────────────────────────────────────────────
 
 
@@ -372,6 +380,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="translation",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(q50_entropy=0.5, q50_margin=0.8),
         )
 
         assert decision.route == "local"
@@ -396,6 +405,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="code_gen",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(q50_entropy=3.0, q50_margin=0.1),
         )
 
         # 低置信度应导致宽区间，可能触发升级
@@ -420,6 +430,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="translation",
             raw_should_escalate=True,  # OR 融合说升级
+            quantile_features=MockQuantileFeatures(q50_entropy=0.5, q50_margin=0.8),
         )
 
         # 如果 score 低（conforming），应抑制升级
@@ -446,6 +457,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="unknown",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(q50_entropy=2.0, q50_margin=0.3),
         )
 
         # 检查决策结构完整
@@ -469,6 +481,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="test",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
         )
 
         router.record_outcome(decision, success=True, escalated=False, task_type="test")
@@ -490,6 +503,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="test",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
         )
 
         router.record_outcome(decision, success=True, escalated=False, task_type="test")
@@ -536,6 +550,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="test",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
         )
 
         assert isinstance(decision, ConformalDecision)
@@ -563,6 +578,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="test",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
         )
 
         sources = decision.uncertainty_sources
@@ -585,6 +601,7 @@ class TestConformalizedRouter:
             features=[0.5] * 8,
             task_type="test",
             raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
         )
 
         signals = decision.layer_signals
