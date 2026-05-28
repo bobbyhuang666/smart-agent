@@ -443,7 +443,7 @@ def _run_local(task: Task) -> Task:
     # - active_verify: 基于不确定性
     should_escalate = (
         cascade_decision["escalate"]
-        or (not ml_prediction["should_use_local"] and ml_prediction["confidence"] > 0.3)
+        or (not ml_prediction["should_use_local"] and ml_prediction["confidence"] > 0.5 and ml.get_stats()["total"] >= 50)
         or active_verify
     )
 
