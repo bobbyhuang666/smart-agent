@@ -118,8 +118,9 @@ def _get_model_registry() -> Any:
 
 # ─── Ollama 调用 ──────────────────────────────────────────────
 
-def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[int] = None) -> dict[str, Any]:
-    """调用 Ollama 本地模型"""
+def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[int] = None,
+                with_logprobs: bool = False) -> dict[str, Any]:
+    """调用 Ollama 本地模型（可选 logprobs 用于置信度提取）"""
     import requests
     config = get_config()
     model = model or config.local_model
@@ -127,14 +128,18 @@ def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[i
     start = time.time()
 
     try:
+        body = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+        }
+        if with_logprobs:
+            body["logprobs"] = True
+
         resp = requests.post(
             f"{config.ollama_base}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_predict": max_tokens},
-            },
+            json=body,
             timeout=60,
         )
         resp.raise_for_status()
@@ -147,6 +152,10 @@ def call_ollama(prompt: str, model: Optional[str] = None, max_tokens: Optional[i
             "tokens_output": data.get("eval_count", 0),
             "time_ms": elapsed,
         }
+
+        # 提取 logprobs（如果请求了）
+        if with_logprobs:
+            result["logprobs"] = data.get("logprobs", [])
 
         # 更新模型统计
         registry = _get_model_registry()

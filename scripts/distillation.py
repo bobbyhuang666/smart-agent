@@ -208,3 +208,221 @@ def get_dynamic_examples(capability: str, store: DistillationStore, limit: int =
         if len(diverse) >= limit:
             break
     return diverse
+
+
+# ─── 质量评估器 ──────────────────────────────────────────────
+
+# 失败信号词
+FAILURE_SIGNALS = [
+    "抱歉", "无法", "不能", "不懂", "作为AI", "我无法", "error", "Error",
+    "失败", "错误", "异常", "不支持", "未找到", "不存在",
+]
+
+# 成功信号词（按能力分类）
+SUCCESS_SIGNALS = {
+    "classification": ["类别", "分类", "属于", "类型"],
+    "translation": ["翻译", "译文"],
+    "extraction": ["提取", "关键词", "摘录"],
+    "summarization": ["总结", "概括", "摘要"],
+    "formatting": ["格式", "格式化"],
+}
+
+
+class QualityEvaluator:
+    """自动评估蒸馏对质量"""
+
+    def evaluate(self, pair: dict) -> float:
+        """
+        评估蒸馏对质量，返回 [0, 1] 分数。
+
+        评估维度：
+        1. 输出长度合理性
+        2. 失败信号检测
+        3. 成功信号匹配
+        4. 与本地输出的一致性（如有）
+        """
+        response = pair.get("response", "")
+        capability = pair.get("capability", "")
+        local_response = pair.get("local_response", "")
+
+        if not response:
+            return 0.0
+
+        # 1. 长度分数
+        length = len(response)
+        if length < 5:
+            length_score = 0.2
+        elif length < 20:
+            length_score = 0.5
+        elif length < 500:
+            length_score = 0.8
+        else:
+            length_score = 0.7
+
+        # 2. 失败信号
+        has_failure = any(s in response for s in FAILURE_SIGNALS)
+        failure_penalty = 0.4 if has_failure else 0.0
+
+        # 3. 成功信号
+        success_bonus = 0.0
+        if capability in SUCCESS_SIGNALS:
+            if any(s in response for s in SUCCESS_SIGNALS[capability]):
+                success_bonus = 0.15
+
+        # 4. 一致性（本地 vs 云端）
+        consistency_score = 0.0
+        if local_response:
+            # 简单的文本重叠度
+            overlap = self._text_overlap(local_response, response)
+            consistency_score = overlap * 0.2
+
+        score = length_score - failure_penalty + success_bonus + consistency_score
+        return max(0.0, min(1.0, round(score, 3)))
+
+    def _text_overlap(self, text1: str, text2: str) -> float:
+        """计算两段文本的重叠度（Jaccard）"""
+        words1 = set(text1.split())
+        words2 = set(text2.split())
+        if not words1 or not words2:
+            return 0.0
+        intersection = words1 & words2
+        union = words1 | words2
+        return len(intersection) / len(union) if union else 0.0
+
+
+# ─── 失败模式聚类 ──────────────────────────────────────────────
+
+class FailureClusterer:
+    """将相似的失败归类，用于针对性改进"""
+
+    def __init__(self):
+        self._clusters: dict[str, list[dict]] = {}
+
+    def cluster_failures(self, pairs: list[dict]) -> dict[str, list[dict]]:
+        """
+        将失败的蒸馏对按失败类型聚类。
+
+        返回: {failure_type: [pairs]}
+        """
+        clusters: dict[str, list[dict]] = {}
+
+        for p in pairs:
+            failure_type = self._classify_failure(p)
+            if failure_type not in clusters:
+                clusters[failure_type] = []
+            clusters[failure_type].append(p)
+
+        self._clusters = clusters
+        return clusters
+
+    def _classify_failure(self, pair: dict) -> str:
+        """分类单个失败"""
+        response = pair.get("response", "")
+        local_response = pair.get("local_response", "")
+        failure_type = pair.get("failure_type", "")
+
+        if failure_type:
+            return failure_type
+
+        if not response or len(response) < 5:
+            return "empty_output"
+
+        if any(s in response for s in ["抱歉", "无法", "不能"]):
+            return "refusal"
+
+        if any(s in response for s in ["error", "Error", "失败", "错误"]):
+            return "error"
+
+        if local_response:
+            overlap = len(set(response.split()) & set(local_response.split()))
+            total = max(len(set(response.split())), 1)
+            if overlap / total < 0.2:
+                return "divergent"
+
+        return "quality_low"
+
+    def get_top_failures(self, n: int = 5) -> list[dict]:
+        """获取最常见的失败模式"""
+        result = []
+        for ftype, pairs in sorted(
+            self._clusters.items(),
+            key=lambda x: len(x[1]),
+            reverse=True,
+        )[:n]:
+            result.append({
+                "failure_type": ftype,
+                "count": len(pairs),
+                "sample_action": pairs[0].get("action", "")[:50],
+                "sample_capability": pairs[0].get("capability", ""),
+            })
+        return result
+
+
+# ─── 闭环管理器 ──────────────────────────────────────────────
+
+class ClosedLoopManager:
+    """闭环蒸馏管理器：评估 → 聚类 → 推进状态"""
+
+    def __init__(self, store: DistillationStore):
+        self.store = store
+        self.evaluator = QualityEvaluator()
+        self.clusterer = FailureClusterer()
+
+    def evaluate_pending(self) -> int:
+        """评估所有 hypothesis 状态的蒸馏对，返回评估数量"""
+        pairs = self.store.get_pairs(state=PAIR_HYPOTHESIS)
+        evaluated = 0
+
+        for p in pairs:
+            score = self.evaluator.evaluate(p)
+
+            if score >= JUDGE_HIGH_THRESHOLD:
+                self.store.update_pair_state(
+                    p["pair_id"], PAIR_SUPPORTED, score=score,
+                    reason=f"auto_eval: score={score:.2f}",
+                )
+            elif score < JUDGE_MODERATE_THRESHOLD:
+                self.store.update_pair_state(
+                    p["pair_id"], PAIR_CONTESTED, score=score,
+                    reason=f"auto_eval: score={score:.2f}",
+                )
+            else:
+                self.store.update_pair_state(
+                    p["pair_id"], PAIR_HYPOTHESIS, score=score,
+                    reason=f"auto_eval: score={score:.2f} (pending review)",
+                )
+            evaluated += 1
+
+        return evaluated
+
+    def analyze_failures(self) -> dict:
+        """分析失败模式"""
+        # 获取所有低质量蒸馏对
+        all_pairs = self.store.get_pairs()
+        failed = [
+            p for p in all_pairs
+            if p.get("quality_score", 0) < JUDGE_MODERATE_THRESHOLD
+            or p.get("epistemic_state") == PAIR_CONTESTED
+        ]
+
+        clusters = self.clusterer.cluster_failures(failed)
+        top_failures = self.clusterer.get_top_failures()
+
+        return {
+            "total_failed": len(failed),
+            "failure_types": len(clusters),
+            "top_failures": top_failures,
+        }
+
+    def run_cycle(self) -> dict:
+        """运行一个完整的闭环周期"""
+        evaluated = self.evaluate_pending()
+        failure_analysis = self.analyze_failures()
+        cleaned = self.store.cleanup_expired()
+
+        return {
+            "evaluated": evaluated,
+            "cleaned": cleaned,
+            "failure_analysis": failure_analysis,
+            "store_stats": self.store.get_stats(),
+        }

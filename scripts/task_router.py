@@ -133,6 +133,18 @@ def _get_weight_tracker():
     return _weight_tracker
 
 
+# 置信度门控级联
+_cascade = None
+
+
+def get_cascade():
+    global _cascade
+    if _cascade is None:
+        from confidence import CascadeDecision
+        _cascade = CascadeDecision(CONFIG.cache_dir)
+    return _cascade
+
+
 # ─── 预处理/后处理 ──────────────────────────────────────────────
 
 def preprocess_text(text: str, max_chars: int = 800) -> str:
@@ -280,16 +292,17 @@ def _run_local_subtasks(task: Task, subtasks: list[dict], clean_text: str) -> bo
 
 
 def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
-    """执行单个本地任务，返回 result 字典"""
+    """执行单个本地任务，返回 result 字典（含置信度数据）"""
     task_type = detect_task_type(clean_action, PROMPT_TEMPLATES)
 
-    # 规则执行
+    # 规则执行（规则引擎 100% 置信度，无需 logprobs）
     rule_result = rule_execute(task_type, clean_text or clean_action)
     if rule_result:
         task.output = rule_result
         task.model_used = "rule_engine"
         task.route = "local(rule)"
-        return {"text": rule_result, "tokens_input": 0, "tokens_output": 0, "time_ms": 0}
+        return {"text": rule_result, "tokens_input": 0, "tokens_output": 0, "time_ms": 0,
+                "confidence": {"confidence": 1.0, "entropy": 0.0, "margin": 1.0}}
 
     # 智能模型选择
     selected_model: Optional[str] = None
@@ -306,9 +319,41 @@ def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
 
     prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
     prompt = enrich_prompt_with_examples(prompt, task_type, clean_text)
+
+    # 推理路径路由：根据复杂度选择最优推理策略
+    from reasoning import select_reasoning_strategy, enhance_prompt_with_strategy, STRATEGY_TOKEN_MULTIPLIER
+    routing_result = estimate_complexity(task)
+    strategy_decision = select_reasoning_strategy(
+        clean_action, clean_text, routing_result["score"], task_type,
+    )
+    strategy = strategy_decision.strategy
+    # 如果有蒸馏示例，用 few_shot 策略
+    examples_str = ""
+    if strategy != "direct" and task_type:
+        examples = get_dynamic_examples(task_type, store, limit=2)
+        if examples:
+            strategy = "few_shot"
+            examples_str = "\n".join(
+                f"{e.get('prompt', '')[:50]} → {e.get('response', '')[:50]}"
+                for e in examples
+            )
+    prompt = enhance_prompt_with_strategy(prompt, strategy, examples_str)
+
     prompt = compress_prompt_tokens(prompt, task_type)
-    max_tokens = get_max_tokens(task_type)
-    result = call_ollama(prompt, model=selected_model, max_tokens=max_tokens)
+    max_tokens = int(get_max_tokens(task_type) * STRATEGY_TOKEN_MULTIPLIER.get(strategy, 1.0))
+
+    # 请求 logprobs 用于置信度提取
+    result = call_ollama(prompt, model=selected_model, max_tokens=max_tokens, with_logprobs=True)
+
+    # 提取置信度信号
+    from confidence import extract_confidence, extract_confidence_from_text
+    logprobs = result.get("logprobs", [])
+    if logprobs:
+        result["confidence"] = extract_confidence(logprobs)
+    else:
+        # Ollama 不支持 logprobs 时降级到启发式
+        result["confidence"] = extract_confidence_from_text(result["text"])
+
     task.output = postprocess_output(result["text"], task_type)
     task.model_used = selected_model or CONFIG.local_model
     return result
@@ -345,7 +390,7 @@ def _validate_and_fallback(task: Task, result: dict, task_type: str) -> dict:
 
 
 def _run_local(task: Task) -> Task:
-    """执行本地任务"""
+    """执行本地任务（含置信度门控级联）"""
     clean_text = preprocess_text(task.text or "")
     clean_action = preprocess_text(task.action, max_chars=200)
 
@@ -355,23 +400,54 @@ def _run_local(task: Task) -> Task:
         subtasks = _recursive_decompose(clean_action, clean_text)
 
     if _run_local_subtasks(task, subtasks, clean_text):
-        # 不在此处缓存，由 _finalize_task 统一处理（避免未验证输出污染缓存）
         return task
 
     # 单任务
     task_type = detect_task_type(clean_action, PROMPT_TEMPLATES)
     result = _run_local_single(task, clean_action, clean_text)
 
-    # 规则引擎命中时直接返回（缓存由 _finalize_task 统一处理）
+    # 规则引擎命中时直接返回
     if task.model_used == "rule_engine":
         return task
 
-    # 输出验证 + 云端降级
+    # 置信度门控级联：检查本地输出置信度，不够则升级到云端
+    cascade = get_cascade()
+    conf_data = result.get("confidence", {})
+    cascade_decision = cascade.should_escalate(conf_data)
+
+    if cascade_decision["escalate"] and CONFIG.cloud_api_key:
+        # 置信度不足 → 升级到云端
+        cloud_result = call_cloud_api(task.action, task.text)
+        if not cloud_result.get("circuit_open"):
+            # 记录升级原因（用于闭环蒸馏）
+            cascade.record_outcome(conf_data, was_correct=False, escalated=True)
+            task.output = cloud_result["text"]
+            task.route = "cascade_escalated"
+            task.model_used = CONFIG.cloud_model
+            task.tokens_input = cloud_result.get("tokens_input", 0)
+            task.tokens_output = cloud_result.get("tokens_output", 0)
+            task.time_ms = cloud_result.get("time_ms", 0)
+            task.cost_saved = 0
+            return task
+        # 云端熔断中，降级使用本地结果（后续验证可能修正）
+        cascade_escalated = False
+    else:
+        cascade_escalated = False
+
+    # 输出验证 + 云端降级（原有的质量验证）
     result = _validate_and_fallback(task, result, task_type)
     task.tokens_input = result.get("tokens_input", 0)
     task.tokens_output = result.get("tokens_output", 0)
     task.time_ms = result.get("time_ms", 0)
     task.cost_saved = calc_savings(task)
+
+    # 级联记录：验证完成后再记录，确保数据准确
+    if task.route == "cloud_fallback":
+        # 验证失败降级到云端 → 本地输出不正确
+        cascade.record_outcome(conf_data, was_correct=False, escalated=True)
+    else:
+        # 本地输出通过验证或云端不可用
+        cascade.record_outcome(conf_data, was_correct=True, escalated=cascade_escalated)
     return task
 
 

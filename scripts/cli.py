@@ -39,6 +39,7 @@ def main() -> None:
     parser.add_argument("--benchmark", nargs="?", const="all", help="基准测试")
     parser.add_argument("--weights", action="store_true", help="查看 A3M 权重状态")
     parser.add_argument("--weights-reset", action="store_true", help="重置 A3M 权重")
+    parser.add_argument("--cascade", action="store_true", help="置信度级联统计")
     args = parser.parse_args()
 
     if args.stats:
@@ -50,12 +51,12 @@ def main() -> None:
         wt = get_weight_tracker()
         stats = wt.get_stats()
         w = wt.get_weights()
-        print(f"A3M 可学习权重状态")
+        print("A3M 可学习权重状态")
         print(f"  学习数据: {stats['total']} 条记录")
         print(f"  本地成功率: {stats.get('local_success_rate', 0):.0%}")
         print(f"  当前阈值: {stats['current_threshold']:.3f} (默认: 3.0)")
         print(f"  学习率: {stats['learning_rate']}")
-        print(f"\n权重参数:")
+        print("\n权重参数:")
         for k, v in w.to_dict().items():
             print(f"  {k}: {v}")
         return
@@ -65,6 +66,21 @@ def main() -> None:
         wt = get_weight_tracker()
         wt.reset()
         print("A3M 权重已重置为默认值")
+        return
+
+    if args.cascade:
+        from task_router import get_cascade
+        cascade = get_cascade()
+        stats = cascade.get_stats()
+        print("置信度门控级联统计")
+        print(f"  总任务数: {stats['total']}")
+        print(f"  升级到云端: {stats['escalated']}")
+        print(f"  本地保留: {stats['local_kept']}")
+        print(f"  升级率: {stats['escalation_rate']:.0%}")
+        print(f"  本地准确率: {stats['local_accuracy']:.0%}")
+        cal = stats.get('calibration', {})
+        print(f"  校准状态: {'已校准' if cal.get('is_calibrated') else '未校准（需 ≥20 个样本）'}")
+        print(f"  校准样本数: {cal.get('total_samples', 0)}")
         return
 
     if args.models:
