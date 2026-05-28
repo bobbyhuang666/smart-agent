@@ -42,6 +42,10 @@ def main() -> None:
     parser.add_argument("--cascade", action="store_true", help="置信度级联统计")
     parser.add_argument("--meta", action="store_true", help="Meta-Learner 统计")
     parser.add_argument("--active", action="store_true", help="主动学习统计")
+    parser.add_argument("--quota-check", action="store_true", help="用量告警检查")
+    parser.add_argument("--keys", action="store_true", help="列出 API Keys")
+    parser.add_argument("--add-key", nargs=2, metavar=("KEY", "TEAM"), help="添加 API Key")
+    parser.add_argument("--remove-key", help="删除 API Key")
     args = parser.parse_args()
 
     if args.stats:
@@ -110,6 +114,49 @@ def main() -> None:
             for item in stats["most_uncertain"]:
                 print(f"    {item['task_type']:20s} 不确定性={item['uncertainty']:.3f} "
                       f"样本={item['sample_count']} 准确率={item['recent_accuracy']:.0%}")
+        return
+
+    if args.quota_check:
+        from audit import get_quota_manager
+        qm = get_quota_manager()
+        alerts = qm.check_all_alerts()
+        if alerts:
+            print("用量告警:")
+            for alert in alerts:
+                print(f"  {alert}")
+        else:
+            print("✅ 所有用户用量正常，无告警")
+        return
+
+    if args.keys:
+        from audit import get_api_key_manager
+        akm = get_api_key_manager()
+        keys = akm.list_keys()
+        if not keys:
+            print("暂无 API Key（使用 --add-key KEY TEAM 添加）")
+            return
+        print(f"API Keys ({len(keys)} 个):")
+        for k in keys:
+            status = "✅" if k["enabled"] else "❌"
+            models = ", ".join(k["allowed_models"]) if k["allowed_models"] else "全部"
+            print(f"  {status} {k['key_prefix']:12s} 团队={k['team']} 月限={k['monthly_task_limit']} 模型={models}")
+        return
+
+    if args.add_key:
+        from audit import get_api_key_manager
+        akm = get_api_key_manager()
+        key, team = args.add_key
+        akm.add_key(key=key, team=team)
+        print(f"✅ 已添加 API Key: {key[:8]}... 团队={team}")
+        return
+
+    if args.remove_key:
+        from audit import get_api_key_manager
+        akm = get_api_key_manager()
+        if akm.remove_key(args.remove_key):
+            print("✅ 已删除 API Key")
+        else:
+            print("❌ 未找到该 API Key")
         return
 
     if args.models:

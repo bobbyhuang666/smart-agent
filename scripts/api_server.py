@@ -34,10 +34,12 @@ from task_router import (
     decompose_complex_task, CONFIG, cache,
     get_model_registry, run_batch,
 )
-from audit import get_audit_logger
+from audit import get_audit_logger, get_api_key_manager, get_quota_manager
 
 # API 认证密钥（环境变量设置，为空则不启用认证）
+# 支持多 Key：设置 TASKROUTER_API_KEYS 环境变量（逗号分隔）
 API_KEY = os.environ.get("TASKROUTER_API_KEY", "")
+API_KEYS_MULTI = [k.strip() for k in os.environ.get("TASKROUTER_API_KEYS", "").split(",") if k.strip()]
 PUBLIC_PATHS = {"/", "/api/health"}
 
 
@@ -71,6 +73,15 @@ class TaskRouterHandler:
         self.app.router.add_get("/api/audit", self._api_audit)
         self.app.router.add_get("/api/audit/summary", self._api_audit_summary)
 
+        # 多 Key 管理路由
+        self.app.router.add_get("/api/keys", self._api_list_keys)
+        self.app.router.add_post("/api/keys", self._api_add_key)
+        self.app.router.add_delete("/api/keys/{key}", self._api_remove_key)
+
+        # 用量告警路由
+        self.app.router.add_get("/api/quota", self._api_quota_status)
+        self.app.router.add_get("/api/quota/alerts", self._api_quota_alerts)
+
         # 仪表盘
         self.app.router.add_get("/", self._serve_dashboard)
 
@@ -86,23 +97,53 @@ class TaskRouterHandler:
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         """API 认证中间件（Bearer token 或 X-API-Key）"""
-        if not API_KEY or request.path in PUBLIC_PATHS:
+        if request.path in PUBLIC_PATHS:
             return await handler(request)
 
-        # 检查 Bearer token
+        # 提取请求中的 Key
+        provided_key = ""
         auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer ") and self._safe_eq(auth_header[7:], API_KEY):
+        if auth_header.startswith("Bearer "):
+            provided_key = auth_header[7:]
+        elif request.headers.get("X-API-Key"):
+            provided_key = request.headers.get("X-API-Key")
+        elif request.query.get("api_key"):
+            provided_key = request.query.get("api_key")
+
+        if not provided_key:
+            # 没有提供 Key，检查是否启用认证
+            if not API_KEY and not API_KEYS_MULTI and not get_api_key_manager().keys:
+                return await handler(request)
+            log.warning("认证失败: %s %s (来源: %s, 未提供 Key)", request.method, request.path, request.remote)
+            return web.json_response(
+                {"error": "未授权：请提供有效的 API Key（Bearer token 或 X-API-Key header）"},
+                status=401,
+            )
+
+        # 优先检查 ApiKeyManager（多 Key 模式）
+        ak_manager = get_api_key_manager()
+        key_config = ak_manager.authenticate(provided_key)
+        if key_config:
+            # 将 Key 信息注入请求
+            request["api_key_config"] = key_config
+            request["team"] = key_config.team
             return await handler(request)
 
-        # 检查 X-API-Key header
-        if self._safe_eq(request.headers.get("X-API-Key", ""), API_KEY):
+        # 兼容单 Key 模式（环境变量）
+        if API_KEY and self._safe_eq(provided_key, API_KEY):
+            request["api_key_config"] = None
+            request["team"] = "system"
             return await handler(request)
 
-        # 检查 query 参数 ?api_key=
-        if self._safe_eq(request.query.get("api_key", ""), API_KEY):
-            return await handler(request)
+        # 兼容多 Key 环境变量
+        if API_KEYS_MULTI:
+            for k in API_KEYS_MULTI:
+                if self._safe_eq(provided_key, k):
+                    request["api_key_config"] = None
+                    request["team"] = "env"
+                    return await handler(request)
 
-        log.warning("认证失败: %s %s (来源: %s)", request.method, request.path, request.remote)
+        log.warning("认证失败: %s %s (来源: %s, Key: %s...)", request.method, request.path, request.remote, provided_key[:8])
         return web.json_response(
             {"error": "未授权：请提供有效的 API Key（Bearer token 或 X-API-Key header）"},
             status=401,
@@ -270,6 +311,61 @@ class TaskRouterHandler:
         days = int(request.query.get("days", "7"))
         summary = audit.get_summary(days=days)
         return web.json_response(summary)
+
+    # ── 多 Key 管理 ──
+
+    async def _api_list_keys(self, request: web.Request) -> web.Response:
+        """列出所有 API Key（脱敏）"""
+        ak_manager = get_api_key_manager()
+        return web.json_response({"keys": ak_manager.list_keys()})
+
+    async def _api_add_key(self, request: web.Request) -> web.Response:
+        """添加新的 API Key"""
+        body = await request.json()
+        key = body.get("key", "")
+        team = body.get("team", "default")
+        if not key:
+            return web.json_response({"error": "key is required"}, status=400)
+
+        ak_manager = get_api_key_manager()
+        ak_manager.add_key(
+            key=key,
+            team=team,
+            description=body.get("description", ""),
+            monthly_task_limit=body.get("monthly_task_limit", 10000),
+            monthly_token_limit=body.get("monthly_token_limit", 1000000),
+            monthly_cost_limit=body.get("monthly_cost_limit", 100.0),
+            allowed_models=body.get("allowed_models", []),
+        )
+        return web.json_response({"status": "created", "key_prefix": key[:8] + "...", "team": team})
+
+    async def _api_remove_key(self, request: web.Request) -> web.Response:
+        """删除 API Key"""
+        key = request.match_info["key"]
+        ak_manager = get_api_key_manager()
+        if ak_manager.remove_key(key):
+            return web.json_response({"status": "deleted"})
+        return web.json_response({"error": "key not found"}, status=404)
+
+    # ── 用量告警 ──
+
+    async def _api_quota_status(self, request: web.Request) -> web.Response:
+        """查看配额状态"""
+        user_id = request.query.get("user_id", "")
+        team = getattr(request, "team", "") or ""
+        if not user_id:
+            user_id = team or "default"
+
+        qm = get_quota_manager()
+        summary = qm.get_usage_summary(user_id)
+        return web.json_response(summary)
+
+    async def _api_quota_alerts(self, request: web.Request) -> web.Response:
+        """查看用量告警"""
+        qm = get_quota_manager()
+        threshold = float(request.query.get("threshold", "80"))
+        alerts = qm.check_all_alerts(alert_threshold=threshold)
+        return web.json_response({"alerts": alerts, "count": len(alerts)})
 
     async def _api_openai_chat(self, request: web.Request) -> web.Response:
         """OpenAI 兼容的 Chat Completions API"""
