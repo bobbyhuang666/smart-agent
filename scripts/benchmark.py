@@ -181,7 +181,7 @@ def main():
         print(f"  节省: ${saved:.4f} ({pct:.0f}%)")
 
     print(f"\n{'=' * 60}")
-    print(f"汇总结果")
+    print("汇总结果")
     print(f"{'=' * 60}")
     print(f"测试用例: {s['total_cases']} 个")
     print(f"路由准确率: {s['accuracy_pct']}%")
@@ -194,7 +194,7 @@ def main():
     # 输出 JSON
     with open("benchmark_results.json", "w") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
-    print(f"\n详细结果已保存到 benchmark_results.json")
+    print("\n详细结果已保存到 benchmark_results.json")
 
 
 if __name__ == "__main__":

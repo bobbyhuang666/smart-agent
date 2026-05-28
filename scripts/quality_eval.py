@@ -322,15 +322,15 @@ class QualityEvaluator:
             match_counts[r.match_type] = match_counts.get(r.match_type, 0) + 1
 
         lines = [
-            f"质量评估报告",
+            "质量评估报告",
             f"{'='*50}",
             f"模型: {results[0].model}",
             f"用例数: {total}",
             f"通过率: {passed}/{total} ({passed/total:.0%})",
             f"平均分: {avg_score:.2f}",
             f"平均延迟: {avg_latency:.0f}ms",
-            f"",
-            f"匹配类型分布:",
+            "",
+            "匹配类型分布:",
         ]
         for match_type, count in sorted(match_counts.items(), key=lambda x: -x[1]):
             lines.append(f"  {match_type}: {count} ({count/total:.0%})")
@@ -363,7 +363,7 @@ if __name__ == "__main__":
         model_b = sys.argv[3] if len(sys.argv) > 3 else "qwen-tool-3b:latest"
         report = evaluator.run_ab_test(model_a, model_b, verbose=True)
         print()
-        print(f"A/B 测试结果:")
+        print("A/B 测试结果:")
         print(f"  {model_a}: 平均分 {report['model_a']['avg_score']}, 胜 {report['model_a']['wins']} 次")
         print(f"  {model_b}: 平均分 {report['model_b']['avg_score']}, 胜 {report['model_b']['wins']} 次")
         print(f"  平局: {report['ties']} 次")

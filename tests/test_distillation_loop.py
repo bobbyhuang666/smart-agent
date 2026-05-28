@@ -31,10 +31,10 @@ class TestQualityEvaluator:
     """质量评估器"""
 
     def test_empty_response_score_zero(self):
-        """空响应得 0 分"""
+        """空响应接近 0 分"""
         evaluator = QualityEvaluator()
         score = evaluator.evaluate({"response": ""})
-        assert score == 0.0
+        assert score <= 0.1
 
     def test_short_response_low_score(self):
         """短响应得分低"""

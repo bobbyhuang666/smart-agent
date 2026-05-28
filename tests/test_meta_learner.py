@@ -283,10 +283,15 @@ class TestActiveLearner:
         assert len(uncertain) <= 1
 
     def test_should_request_verification(self, tmp_dir):
-        """不确定时应请求验证"""
+        """足够数据 + 不确定时应请求验证"""
         al = ActiveLearner(tmp_dir)
-        # 无数据 → 高不确定性 → 应该请求验证
-        assert al.should_request_verification("new_task")
+        # 添加波动数据使不确定性高
+        for i in range(10):
+            al.record("volatile_task", 0.9 if i % 2 == 0 else 0.1, i % 2 == 0)
+        # 数据不足时冷启动保护不触发
+        assert not al.should_request_verification("new_task")
+        # 有足够数据且不确定时触发
+        assert al.should_request_verification("volatile_task")
 
     def test_stable_task_no_verification(self, tmp_dir):
         """稳定任务不需要验证"""

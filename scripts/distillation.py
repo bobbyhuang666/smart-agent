@@ -229,65 +229,188 @@ SUCCESS_SIGNALS = {
 
 
 class QualityEvaluator:
-    """自动评估蒸馏对质量"""
+    """
+    多维度蒸馏对质量评估器。
+
+    评估维度（5 个独立信号，加权融合）：
+    1. 结构完整性：输出是否有组织（列表、分类、段落）
+    2. 内容相关性：输出是否与输入内容相关
+    3. 失败信号：是否包含拒绝/错误信号
+    4. 任务适配：输出格式是否匹配任务类型
+    5. 一致性：与本地输出的重叠度（如有）
+    """
+
+    # 任务类型期望的输出特征
+    TASK_EXPECTATIONS = {
+        "classification": {"min_items": 2, "has_separator": True, "label_pattern": True},
+        "translation": {"min_length": 5, "no_source_lang": True},
+        "extraction": {"min_items": 1, "has_separator": True},
+        "summarization": {"min_length": 20, "max_ratio": 0.8},
+        "formatting": {"has_structure": True},
+    }
 
     def evaluate(self, pair: dict) -> float:
-        """
-        评估蒸馏对质量，返回 [0, 1] 分数。
-
-        评估维度：
-        1. 输出长度合理性
-        2. 失败信号检测
-        3. 成功信号匹配
-        4. 与本地输出的一致性（如有）
-        """
+        """评估蒸馏对质量，返回 [0, 1] 分数。"""
         response = pair.get("response", "")
+        prompt = pair.get("prompt", "")
         capability = pair.get("capability", "")
         local_response = pair.get("local_response", "")
 
-        if not response:
-            return 0.0
+        if not response or len(response.strip()) < 3:
+            return 0.05
 
-        # 1. 长度分数
-        length = len(response)
-        if length < 5:
-            length_score = 0.2
-        elif length < 20:
-            length_score = 0.5
-        elif length < 500:
-            length_score = 0.8
-        else:
-            length_score = 0.7
+        # 信号 1：结构完整性 (权重 0.25)
+        structure_score = self._score_structure(response)
 
-        # 2. 失败信号
-        has_failure = any(s in response for s in FAILURE_SIGNALS)
-        failure_penalty = 0.4 if has_failure else 0.0
+        # 信号 2：内容相关性 (权重 0.25)
+        relevance_score = self._score_relevance(prompt, response)
 
-        # 3. 成功信号
-        success_bonus = 0.0
-        if capability in SUCCESS_SIGNALS:
-            if any(s in response for s in SUCCESS_SIGNALS[capability]):
-                success_bonus = 0.15
+        # 信号 3：失败信号 (权重 0.25，负向)
+        failure_score = self._score_failure(response)
 
-        # 4. 一致性（本地 vs 云端）
-        consistency_score = 0.0
-        if local_response:
-            # 简单的文本重叠度
-            overlap = self._text_overlap(local_response, response)
-            consistency_score = overlap * 0.2
+        # 信号 4：任务适配 (权重 0.15)
+        task_score = self._score_task_fit(response, capability, prompt)
 
-        score = length_score - failure_penalty + success_bonus + consistency_score
+        # 信号 5：一致性 (权重 0.10)
+        consistency_score = self._score_consistency(response, local_response)
+
+        score = (
+            0.25 * structure_score
+            + 0.25 * relevance_score
+            + 0.25 * failure_score
+            + 0.15 * task_score
+            + 0.10 * consistency_score
+        )
         return max(0.0, min(1.0, round(score, 3)))
 
-    def _text_overlap(self, text1: str, text2: str) -> float:
-        """计算两段文本的重叠度（Jaccard）"""
-        words1 = set(text1.split())
-        words2 = set(text2.split())
+    def _score_structure(self, response: str) -> float:
+        """评估输出结构完整性"""
+        lines = [line.strip() for line in response.split("\n") if line.strip()]
+        score = 0.3  # 基线
+
+        # 多行输出 → 有组织
+        if len(lines) >= 2:
+            score += 0.2
+
+        # 包含列表标记
+        list_markers = sum(1 for line in lines if line[:2] in ("1.", "2.", "3.", "- ", "* ", "•"))
+        if list_markers >= 2:
+            score += 0.2
+
+        # 包含分隔符（冒号、箭头、分类标记）
+        separators = sum(1 for line in lines if any(c in line for c in [":", "：", "→", "→", "|"]))
+        if separators >= 1:
+            score += 0.15
+
+        # 包含数字（可能是数据、统计）
+        has_numbers = any(c.isdigit() for c in response)
+        if has_numbers:
+            score += 0.1
+
+        return min(1.0, score)
+
+    def _score_relevance(self, prompt: str, response: str) -> float:
+        """评估输出与输入的相关性"""
+        if not prompt:
+            return 0.5
+
+        # 提取 prompt 中的关键词（去停用词）
+        stop_words = {"的", "了", "是", "在", "和", "有", "将", "与", "对", "把",
+                      "the", "a", "an", "is", "are", "was", "were", "in", "on", "at"}
+        prompt_words = set(w for w in prompt.split() if w not in stop_words and len(w) > 1)
+        response_words = set(w for w in response.split() if w not in stop_words and len(w) > 1)
+
+        if not prompt_words:
+            return 0.5
+
+        # 关键词覆盖率
+        overlap = prompt_words & response_words
+        coverage = len(overlap) / len(prompt_words)
+
+        # 覆盖率适中最好（太高可能是复制，太低可能是无关）
+        if 0.1 <= coverage <= 0.8:
+            return 0.6 + coverage * 0.4
+        elif coverage > 0.8:
+            return 0.7  # 可能是复制输入
+        else:
+            return max(0.3, 0.5 + coverage)
+
+    def _score_failure(self, response: str) -> float:
+        """评估失败信号（1.0 = 无失败，0.0 = 明确失败）"""
+        # 强失败信号
+        strong_failures = ["抱歉", "无法", "不能", "作为AI", "我无法", "Error", "error"]
+        if any(s in response for s in strong_failures):
+            return 0.1
+
+        # 弱失败信号
+        weak_failures = ["不懂", "未找到", "不存在", "不支持", "失败"]
+        if any(s in response for s in weak_failures):
+            return 0.4
+
+        # 输出过短（可能是不完整回答）
+        if len(response.strip()) < 10:
+            return 0.5
+
+        return 0.95
+
+    def _score_task_fit(self, response: str, capability: str, prompt: str) -> float:
+        """评估输出格式是否匹配任务类型"""
+        if not capability:
+            return 0.5
+
+        expectations = self.TASK_EXPECTATIONS.get(capability, {})
+        score = 0.5
+
+        # 分类任务：应有多个类别
+        if capability == "classification":
+            lines = [line.strip() for line in response.split("\n") if line.strip()]
+            if len(lines) >= expectations.get("min_items", 2):
+                score += 0.3
+            if any(c in response for c in [":", "：", "→"]):
+                score += 0.2
+
+        # 翻译任务：输出应有实质内容
+        elif capability == "translation":
+            if len(response) >= expectations.get("min_length", 5):
+                score += 0.3
+            # 不应包含原文语言标记
+            if not response.startswith("Translation:"):
+                score += 0.2
+
+        # 提取任务：应有列表
+        elif capability == "extraction":
+            if any(c in response for c in [",", "，", "\n", "、"]):
+                score += 0.3
+
+        # 摘要任务：应比原文短
+        elif capability == "summarization":
+            if len(response) >= expectations.get("min_length", 20):
+                score += 0.3
+
+        return min(1.0, score)
+
+    def _score_consistency(self, response: str, local_response: str) -> float:
+        """评估与本地输出的一致性"""
+        if not local_response:
+            return 0.5  # 无参照
+
+        # Jaccard 相似度
+        words1 = set(response.split())
+        words2 = set(local_response.split())
         if not words1 or not words2:
-            return 0.0
+            return 0.3
+
         intersection = words1 & words2
         union = words1 | words2
-        return len(intersection) / len(union) if union else 0.0
+        jaccard = len(intersection) / len(union) if union else 0.0
+
+        # 适中一致性最好（太高=云端没增加价值，太低=可能有一个错了）
+        if 0.2 <= jaccard <= 0.8:
+            return 0.5 + jaccard * 0.5
+        elif jaccard > 0.8:
+            return 0.7
+        else:
+            return max(0.2, 0.3 + jaccard)
 
 
 # ─── 失败模式聚类 ──────────────────────────────────────────────

@@ -333,13 +333,17 @@ class ActiveLearner:
         results.sort(key=lambda x: x["uncertainty"], reverse=True)
         return results[:n]
 
-    def should_request_verification(self, task_type: str, threshold: float = 0.3) -> bool:
+    def should_request_verification(
+        self, task_type: str, threshold: float = 0.3, min_samples: int = 5,
+    ) -> bool:
         """
         判断是否应该请求云端验证（主动学习）。
 
-        当不确定性高于阈值时，即使本地置信度足够，也建议请求云端验证
-        以收集更多训练数据。
+        冷启动保护：样本数不足时不触发验证，避免每种新任务都多花 3 次云端调用。
         """
+        stats = self._task_stats.get(task_type)
+        if not stats or len(stats["predictions"]) < min_samples:
+            return False  # 冷启动保护：数据不足不触发
         return self.get_uncertainty(task_type) > threshold
 
     def get_stats(self) -> dict:

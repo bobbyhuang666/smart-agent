@@ -411,7 +411,7 @@ def _run_local(task: Task) -> Task:
     if task.model_used == "rule_engine":
         return task
 
-    # 置信度门控级联：检查本地输出置信度，不够则升级到云端
+    # ── 三层决策：Cascade + Meta-Learner + Active Learner ──
     cascade = get_cascade()
     conf_data = result.get("confidence", {})
     cascade_decision = cascade.should_escalate(conf_data)
@@ -433,15 +433,29 @@ def _run_local(task: Task) -> Task:
     )
     ml_prediction = ml.predict(features)
 
-    # 主动学习：不确定的任务类型请求云端验证
-    active_verify = al.should_request_verification(task_type) and CONFIG.cloud_api_key
+    # 主动学习：不确定的任务类型请求云端验证（带冷启动保护）
+    active_verify = al.should_request_verification(task_type, min_samples=5) and CONFIG.cloud_api_key
 
-    if (cascade_decision["escalate"] or active_verify) and CONFIG.cloud_api_key:
-        # 置信度不足 → 升级到云端
+    # 决策融合：三个信号投票
+    # - cascade: 基于置信度阈值
+    # - ml_prediction: 基于全局特征的 P(本地成功)
+    # - active_verify: 基于不确定性
+    should_escalate = (
+        cascade_decision["escalate"]
+        or (not ml_prediction["should_use_local"] and ml_prediction["confidence"] > 0.3)
+        or active_verify
+    )
+
+    def _record_and_return(escalated: bool, cloud_used: bool = False) -> None:
+        """统一记录所有学习信号（避免提前 return 跳过学习）"""
+        local_success = not cloud_used and task.route != "cloud_fallback" and task.route != "error"
+        cascade.record_outcome(conf_data, was_correct=local_success or cloud_used, escalated=escalated)
+        ml.record_and_learn(features, success=local_success, route=task.route, task_type=task_type)
+        al.record(task_type, ml_prediction["local_success_prob"], local_success)
+
+    if should_escalate and CONFIG.cloud_api_key:
         cloud_result = call_cloud_api(task.action, task.text)
         if not cloud_result.get("circuit_open"):
-            # 记录升级原因（用于闭环蒸馏）
-            cascade.record_outcome(conf_data, was_correct=False, escalated=True)
             task.output = cloud_result["text"]
             task.route = "cascade_escalated"
             task.model_used = CONFIG.cloud_model
@@ -449,32 +463,22 @@ def _run_local(task: Task) -> Task:
             task.tokens_output = cloud_result.get("tokens_output", 0)
             task.time_ms = cloud_result.get("time_ms", 0)
             task.cost_saved = 0
+            _record_and_return(escalated=True, cloud_used=True)
             return task
-        # 云端熔断中，降级使用本地结果（后续验证可能修正）
+        # 云端熔断中，降级使用本地结果
         cascade_escalated = False
     else:
         cascade_escalated = False
 
-    # 输出验证 + 云端降级（原有的质量验证）
+    # 输出验证 + 云端降级
     result = _validate_and_fallback(task, result, task_type)
     task.tokens_input = result.get("tokens_input", 0)
     task.tokens_output = result.get("tokens_output", 0)
     task.time_ms = result.get("time_ms", 0)
     task.cost_saved = calc_savings(task)
 
-    # 级联记录：验证完成后再记录，确保数据准确
-    if task.route == "cloud_fallback":
-        # 验证失败降级到云端 → 本地输出不正确
-        cascade.record_outcome(conf_data, was_correct=False, escalated=True)
-    else:
-        # 本地输出通过验证或云端不可用
-        cascade.record_outcome(conf_data, was_correct=True, escalated=cascade_escalated)
-
-    # Meta-Learner 学习 + 主动学习记录
-    local_success = task.route != "cloud_fallback" and task.route != "error"
-    ml.record_and_learn(features, success=local_success, route=task.route, task_type=task_type)
-    al.record(task_type, ml_prediction["local_success_prob"], local_success)
-
+    # 统一记录学习信号
+    _record_and_return(escalated=cascade_escalated or task.route == "cloud_fallback")
     return task
 
 
