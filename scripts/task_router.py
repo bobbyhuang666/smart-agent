@@ -592,6 +592,7 @@ def _run_local(task: Task) -> Task:
             success=local_success or cloud_used,
             escalated=escalated,
             task_type=task_type,
+            features=features,
         )
 
         # 策略反馈记录：追踪推理策略效果

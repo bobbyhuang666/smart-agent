@@ -348,9 +348,7 @@ class ConformalizedRouter:
             ConformalDecision
         """
         # 1. 计算 nonconformity score（使用原始 logprob 特征，不使用校准置信度）
-        score = self._compute_nonconformity_score(
-            cascade_decision, tqbc_decision, ml_prediction, features,
-            quantile_features=quantile_features)
+        score = self._compute_nonconformity_score(features, quantile_features=quantile_features)
 
         # 2-4: 读取 calibrator/aci 状态需要加锁，防止并发 record_outcome 导致不一致
         with self._lock:
@@ -358,7 +356,7 @@ class ConformalizedRouter:
             prediction_set = self._build_prediction_set(score, threshold, raw_should_escalate)
             ci = self._compute_confidence_interval(score)
 
-        # 5. 分解不确定性
+        # 5. 分解不确定性（vote_entropy 只计算一次）
         vote_entropy = self._compute_vote_entropy(
             cascade_decision, tqbc_decision, ml_prediction, active_verify)
         uncertainty_sources = self.decomposer.decompose(
@@ -395,7 +393,6 @@ class ConformalizedRouter:
                 "uncertainty": getattr(tqbc_decision, 'uncertainty', 0.5),
             },
             "raw_fusion": raw_should_escalate,
-            "features": features,
         }
 
         # 构建原因
@@ -423,6 +420,7 @@ class ConformalizedRouter:
         success: bool,
         escalated: bool,
         task_type: str,
+        features: list[float] | None = None,
     ) -> None:
         """
         记录决策结果，更新 ACI 和校准器。
@@ -432,6 +430,7 @@ class ConformalizedRouter:
             success: 任务是否成功
             escalated: 是否升级到云端
             task_type: 任务类型
+            features: 特征向量（用于更新 UncertaintyDecomposer）
         """
         with self._lock:
             # 更新滑动窗口校准器
@@ -445,7 +444,8 @@ class ConformalizedRouter:
             self.aci.update(err)
 
             # 更新不确定性分解器
-            self.decomposer.update(task_type, decision.layer_signals.get("features", []))
+            if features:
+                self.decomposer.update(task_type, features)
 
             # 定期保存
             if self.aci.n_steps % 10 == 0:
@@ -479,9 +479,6 @@ class ConformalizedRouter:
 
     def _compute_nonconformity_score(
         self,
-        cascade_decision: dict,
-        tqbc_decision,
-        ml_prediction: dict,
         features: list[float],
         quantile_features: Any = None,
     ) -> float:
@@ -497,30 +494,17 @@ class ConformalizedRouter:
              + 0.15 * s_shift    (分布偏移)
         """
         if quantile_features is not None:
-            # 使用原始 logprob 特征（满足 exchangeability）
-            # q50_entropy: 典型 token 的不确定性，值越高越不确定
-            # 归一化：entropy 范围约 [0, ln(vocab_size)]，用 sigmoid 映射到 [0,1]
             s_entropy = 1.0 / (1.0 + math.exp(-2.0 * (quantile_features.q50_entropy - 1.5)))
-
-            # q50_margin: top-1 vs top-2 的概率差，值越小越不确定
-            # margin ∈ [0, 1]，直接用 1-margin
             s_margin = 1.0 - max(0.0, min(1.0, quantile_features.q50_margin))
-
-            # entropy_variance: 序列内一致性，值越高越不确定
             s_variance = 1.0 / (1.0 + math.exp(-5.0 * (quantile_features.entropy_variance - 0.5)))
         else:
-            # Fallback: 使用投票熵（不含校准置信度）
-            vote_entropy = self._compute_vote_entropy(
-                cascade_decision, tqbc_decision, ml_prediction, False)
-            max_entropy = math.log(4)
-            s_entropy = vote_entropy / max_entropy if max_entropy > 0 else 0.0
-            s_margin = 0.5  # 无数据时中性值
+            # Fallback: 中性默认值
+            s_entropy = 0.5
+            s_margin = 0.5
             s_variance = 0.5
 
-        # s_shift: 分布偏移
         s_shift = self.decomposer._compute_distribution_shift(features)
 
-        # 加权组合
         score = 0.40 * s_entropy + 0.30 * s_margin + 0.15 * s_variance + 0.15 * s_shift
         return max(0.0, min(1.0, score))
 
@@ -630,52 +614,33 @@ class ConformalizedRouter:
     # ─── 持久化 ──────────────────────────────────────────────
 
     def _save(self) -> None:
-        """保存状态到磁盘"""
-        aci_file = os.path.join(self.cache_dir, "conformal_aci_state.json")
-        history_file = os.path.join(self.cache_dir, "conformal_history.jsonl")
-        decomposer_file = os.path.join(self.cache_dir, "conformal_decomposer.json")
-
-        with open(aci_file, "w") as f:
-            json.dump(self.aci.to_dict(), f, indent=2)
-
-        with open(history_file, "w") as f:
-            for score, correct in self.calibrator.scores:
-                f.write(json.dumps({"score": score, "correct": correct}) + "\n")
-
-        with open(decomposer_file, "w") as f:
-            json.dump(self.decomposer.to_dict(), f, indent=2)
+        """保存状态到磁盘（单文件）"""
+        state_file = os.path.join(self.cache_dir, "conformal_state.json")
+        state = {
+            "aci": self.aci.to_dict(),
+            "scores": self.calibrator.scores,
+            "decomposer": self.decomposer.to_dict(),
+        }
+        with open(state_file, "w") as f:
+            json.dump(state, f)
 
     def _load(self) -> None:
         """从磁盘加载状态"""
-        aci_file = os.path.join(self.cache_dir, "conformal_aci_state.json")
-        history_file = os.path.join(self.cache_dir, "conformal_history.jsonl")
-        decomposer_file = os.path.join(self.cache_dir, "conformal_decomposer.json")
-
-        if os.path.exists(aci_file):
-            try:
-                with open(aci_file) as f:
-                    self.aci = AdaptiveConformalInference.from_dict(json.load(f))
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        if os.path.exists(history_file):
-            try:
-                scores = []
-                with open(history_file) as f:
-                    for line in f:
-                        item = json.loads(line.strip())
-                        scores.append((item["score"], item["correct"]))
+        state_file = os.path.join(self.cache_dir, "conformal_state.json")
+        if not os.path.exists(state_file):
+            return
+        try:
+            with open(state_file) as f:
+                state = json.load(f)
+            if "aci" in state:
+                self.aci = AdaptiveConformalInference.from_dict(state["aci"])
+            if "scores" in state:
                 self.calibrator = SlidingWindowCalibrator.from_list(
-                    scores, self.calibrator.window_size)
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-        if os.path.exists(decomposer_file):
-            try:
-                with open(decomposer_file) as f:
-                    self.decomposer = UncertaintyDecomposer.from_dict(json.load(f))
-            except (json.JSONDecodeError, KeyError):
-                pass
+                    state["scores"], self.calibrator.window_size)
+            if "decomposer" in state:
+                self.decomposer = UncertaintyDecomposer.from_dict(state["decomposer"])
+        except (json.JSONDecodeError, KeyError):
+            pass
 
 
 # ─── 全局实例 ──────────────────────────────────────────────────
