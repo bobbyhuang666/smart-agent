@@ -147,7 +147,7 @@ def main() -> None:
         akm = get_api_key_manager()
         key, team = args.add_key
         akm.add_key(key=key, team=team)
-        print(f"✅ 已添加 API Key: {key[:8]}... 团队={team}")
+        print(f"✅ 已添加 API Key: {key[:4]}**** 团队={team}")
         return
 
     if args.remove_key:

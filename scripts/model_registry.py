@@ -8,6 +8,7 @@
 - 支持动态模型上下线
 """
 
+import atexit
 import os
 import json
 import time
@@ -102,6 +103,7 @@ class ModelRegistry:
         self._lock = threading.Lock()
         self._update_count = 0
         self._save_interval = 10  # 每 N 次更新才写磁盘
+        atexit.register(self.flush)  # 进程退出时强制持久化
         self._load()
 
     def _load(self):
@@ -325,9 +327,12 @@ class ModelRegistry:
                 self._save()
 
     def flush(self) -> None:
-        """强制持久化到磁盘"""
-        with self._lock:
-            self._save()
+        """强制持久化到磁盘（容错：目录不存在时不报错）"""
+        try:
+            with self._lock:
+                self._save()
+        except OSError:
+            pass
 
     def run_benchmark(self, model_name: str = None, capabilities: list = None) -> dict:
         """

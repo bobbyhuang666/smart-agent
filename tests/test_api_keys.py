@@ -124,8 +124,8 @@ class TestApiKeyManager:
         manager.add_key(key="tk-test-001-very-long-key", team="测试组")
         info = manager.get_key_info("tk-test-001-very-long-key")
         assert info is not None
-        assert "..." in info["key_prefix"]
-        assert info["key_prefix"].startswith("tk-test-")
+        assert "****" in info["key_prefix"]
+        assert info["key_prefix"].startswith("tk-t")
 
     def test_list_keys(self, manager):
         """列出所有 Key"""

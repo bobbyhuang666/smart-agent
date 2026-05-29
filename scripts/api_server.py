@@ -65,6 +65,15 @@ class TokenBucketRateLimiter:
             return True
         now = time.time()
         with self._lock:
+            # 每 1000 次请求清理一次过期桶
+            self._request_count = getattr(self, '_request_count', 0) + 1
+            if self._request_count >= 1000:
+                self._request_count = 0
+                cutoff = now - 300
+                stale = [k for k, v in self._buckets.items() if v["last"] < cutoff]
+                for k in stale:
+                    del self._buckets[k]
+
             bucket = self._buckets.get(key)
             if not bucket:
                 self._buckets[key] = {"tokens": self.rpm - 1, "last": now}
@@ -77,14 +86,6 @@ class TokenBucketRateLimiter:
                 bucket["tokens"] -= 1
                 return True
             return False
-
-    def cleanup(self, max_age: float = 300) -> None:
-        """清理长时间未活跃的桶"""
-        cutoff = time.time() - max_age
-        with self._lock:
-            stale = [k for k, v in self._buckets.items() if v["last"] < cutoff]
-            for k in stale:
-                del self._buckets[k]
 
 
 # ─── API 处理器 ──────────────────────────────────────────────────
@@ -220,7 +221,7 @@ class TaskRouterHandler:
         # 优先用 API key，其次用 IP
         rate_key = request.get("api_key_config")
         if rate_key and hasattr(rate_key, "key"):
-            rate_key = rate_key.key[:8]
+            rate_key = rate_key.key[:4]
         else:
             rate_key = request.remote or "unknown"
         if not self.rate_limiter.allow(str(rate_key)):
@@ -470,7 +471,7 @@ class TaskRouterHandler:
             monthly_cost_limit=body.get("monthly_cost_limit", 100.0),
             allowed_models=body.get("allowed_models", []),
         )
-        return web.json_response({"status": "created", "key_prefix": key[:8] + "...", "team": team})
+        return web.json_response({"status": "created", "key_prefix": key[:4] + "****", "team": team})
 
     async def _api_remove_key(self, request: web.Request) -> web.Response:
         """删除 API Key（需要管理员权限）"""
@@ -516,6 +517,15 @@ class TaskRouterHandler:
                     "code": "missing_parameter",
                 }
             }, status=400)
+
+        # 验证 messages 数组大小和总内容长度
+        if len(messages) > 500:
+            return web.json_response({
+                "error": {"message": "messages 数组超过最大长度 (500)", "type": "invalid_request_error"}
+            }, status=400)
+        total_content_len = sum(len(str(m.get("content", ""))) for m in messages)
+        if total_content_len > MAX_INPUT_LENGTH:
+            raise web.HTTPRequestEntityTooLarge(max_size=MAX_REQUEST_SIZE, actual_size=total_content_len)
 
         # 从 messages 中提取 action 和 text
         # 支持多种格式：
@@ -814,13 +824,19 @@ def start_server(host="127.0.0.1", port=8930):
     handler = TaskRouterHandler()
     app = handler.app
 
-    auth_status = "已启用" if API_KEY else "未设置（开放访问）"
+    has_key = bool(API_KEY or API_KEYS_MULTI or get_api_key_manager().keys)
+    auth_status = "已启用" if has_key else "未设置（开放访问）"
     log.info("TaskRouter API v6.0.0 启动: %s:%d, 认证: %s", host, port, auth_status)
+
+    if not has_key:
+        log.warning("⚠️ 未配置 API Key，所有接口无需认证即可访问。生产环境请设置 TASKROUTER_API_KEY 环境变量。")
 
     print("TaskRouter API 服务器启动 (异步)")
     print(f"  地址: http://{host}:{port}")
     print(f"  仪表盘: http://{host}:{port}/")
     print(f"  认证: {auth_status}")
+    if not has_key:
+        print("  ⚠️ 警告: 未配置 API Key，所有接口无需认证即可访问！")
     print("  API 文档:")
     print("    POST /api/task              - 执行任务")
     print("    POST /api/estimate          - 预估路由")

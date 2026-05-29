@@ -32,6 +32,7 @@ Token-Quantile Bayesian Cascade (TQBC) — 论文级创新
 [7] FrugalGPT. Chen et al. 2023.
 """
 
+import atexit
 import math
 import os
 import random
@@ -283,6 +284,7 @@ class ThompsonSamplingRouter:
         self._lock = threading.Lock()
         self._update_count = 0
         self._save_interval = 10  # 每 N 次更新才写磁盘
+        atexit.register(self.flush)  # 进程退出时强制持久化
 
         # 每个臂的贝叶斯线性回归参数
         # 使用 Normal-Inverse-Gamma 先验
@@ -471,9 +473,12 @@ class ThompsonSamplingRouter:
                 self._save()
 
     def flush(self) -> None:
-        """强制持久化当前参数到磁盘"""
-        with self._lock:
-            self._save()
+        """强制持久化当前参数到磁盘（容错：目录不存在时不报错）"""
+        try:
+            with self._lock:
+                self._save()
+        except OSError:
+            pass
 
     def get_stats(self) -> dict:
         """获取路由器统计"""

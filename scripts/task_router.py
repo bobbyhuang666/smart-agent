@@ -277,20 +277,20 @@ def auto_collect_on_cloud(task: Task, result: dict) -> None:
     if not result.get("text"):
         return
     pair = collect_distillation_pair(
-        prompt=task.action, response=result["text"],
+        prompt=_scrub_pii(task.action), response=_scrub_pii(result["text"]),
         task_type=detect_task_type(task.action, PROMPT_TEMPLATES),
-        route="cloud", action=task.action, model_used=task.model_used,
+        route="cloud", action=_scrub_pii(task.action), model_used=task.model_used,
     )
     store.add_pair(pair)
 
 
 def auto_collect_on_local_failure(task: Task, local_output: str, cloud_output: str, failure_type: str = "") -> None:
     pair = collect_distillation_pair(
-        prompt=task.action, response=cloud_output,
+        prompt=_scrub_pii(task.action), response=_scrub_pii(cloud_output),
         task_type=detect_task_type(task.action, PROMPT_TEMPLATES),
-        route="local_fallback", action=task.action, model_used=task.model_used,
+        route="local_fallback", action=_scrub_pii(task.action), model_used=task.model_used,
     )
-    pair.local_response = local_output
+    pair.local_response = _scrub_pii(local_output)
     pair.failure_type = failure_type
     store.add_pair(pair)
 
@@ -695,14 +695,14 @@ def _finalize_task(task: Task) -> None:
                   ttl_hours=CONFIG.get_cache_ttl(detect_task_type(task.action, PROMPT_TEMPLATES)))
     log_usage(task)
 
-    # 审计日志
+    # 审计日志（PII 脱敏）
     try:
         from audit import get_audit_logger, AuditEvent
         audit = get_audit_logger()
         audit.log(AuditEvent(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
             event_type="task_execution",
-            action=task.action[:100],
+            action=_scrub_pii(task.action[:100]),
             details={"route": task.route, "model": task.model_used,
                      "tokens_input": task.tokens_input, "tokens_output": task.tokens_output,
                      "cost_saved": task.cost_saved, "output_length": len(task.output or "")},

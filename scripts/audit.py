@@ -166,7 +166,7 @@ class ApiKeyManager:
         if not config:
             return None
         return {
-            "key_prefix": key[:8] + "..." if len(key) > 8 else key,
+            "key_prefix": key[:4] + "****" if len(key) > 4 else "****",
             "team": config.team,
             "description": config.description,
             "role": config.role,
