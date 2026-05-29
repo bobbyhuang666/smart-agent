@@ -178,6 +178,7 @@ def evaluate_routing(
     target_coverage: float = 0.9,
     seed: int = 42,
     verbose: bool = False,
+    route_fn=None,
 ) -> BenchmarkResult:
     """
     评估路由质量。
@@ -189,10 +190,12 @@ def evaluate_routing(
     """
     result = BenchmarkResult()
     start = time.monotonic()
+    if route_fn is None:
+        route_fn = _heuristic_route
 
     for task in tasks:
-        # 模拟路由决策（基于难度 + 类别的启发式）
-        predicted_route = _heuristic_route(task)
+        # 模拟路由决策
+        predicted_route = route_fn(task)
 
         # 模拟 prediction_set（基于难度的不确定性）
         prediction_set = _heuristic_prediction_set(task, target_coverage)
@@ -274,6 +277,11 @@ def _heuristic_route(task: EvalTask) -> str:
     if task.category in cloud_bias_categories:
         return "cloud" if random.random() < 0.6 else "local"
     return "local" if random.random() < 0.7 else "cloud"
+
+
+def _random_route(task: EvalTask) -> str:
+    """随机路由基线（50/50）"""
+    return "cloud" if random.random() < 0.5 else "local"
 
 
 def _heuristic_prediction_set(task: EvalTask, target_coverage: float) -> list[str]:
@@ -391,6 +399,26 @@ def save_json(result: BenchmarkResult, path: str) -> None:
 # ─── CLI ──────────────────────────────────────────────────────
 
 
+def print_comparison(heuristic: BenchmarkResult, random_baseline: BenchmarkResult) -> None:
+    """打印策略对比表"""
+    h_acc = heuristic.correct_routes / heuristic.total_tasks * 100
+    r_acc = random_baseline.correct_routes / random_baseline.total_tasks * 100
+    h_cov = heuristic.conformal_coverage_hits / heuristic.total_tasks * 100
+    r_cov = random_baseline.conformal_coverage_hits / random_baseline.total_tasks * 100
+    h_savings = (1 - heuristic.total_cost_actual / heuristic.total_cost_cloud) * 100 if heuristic.total_cost_cloud > 0 else 0
+    r_savings = (1 - random_baseline.total_cost_actual / random_baseline.total_cost_cloud) * 100 if random_baseline.total_cost_cloud > 0 else 0
+
+    print("\n" + "=" * 70)
+    print("策略对比")
+    print("=" * 70)
+    print(f"\n{'指标':20} {'智能路由':12} {'随机基线':12} {'提升':12}")
+    print("-" * 56)
+    print(f"{'路由准确率':20} {h_acc:11.1f}% {r_acc:11.1f}% {h_acc - r_acc:+11.1f}%")
+    print(f"{'Conformal 覆盖率':20} {h_cov:11.1f}% {r_cov:11.1f}% {h_cov - r_cov:+11.1f}%")
+    print(f"{'成本节省':20} {h_savings:11.1f}% {r_savings:11.1f}% {h_savings - r_savings:+11.1f}%")
+    print(f"{'实际成本':20} ${heuristic.total_cost_actual:10.6f} ${random_baseline.total_cost_actual:10.6f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="TaskRouter 路由评估")
     parser.add_argument("--tasks", type=int, default=0, help="限制任务数（0=全部）")
@@ -406,9 +434,14 @@ def main():
         tasks = tasks[:args.tasks]
 
     print(f"评估 {len(tasks)} 个任务（seed={args.seed}）...")
-    result = evaluate_routing(tasks, verbose=args.verbose)
+    result = evaluate_routing(tasks, verbose=args.verbose, route_fn=_heuristic_route)
     print_report(result)
     save_json(result, args.output)
+
+    # 随机基线对比
+    random.seed(args.seed)
+    random_result = evaluate_routing(tasks, route_fn=_random_route)
+    print_comparison(result, random_result)
 
 
 if __name__ == "__main__":
