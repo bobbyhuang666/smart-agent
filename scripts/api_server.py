@@ -94,6 +94,14 @@ class TaskRouterHandler:
         """常量时间比较，防止时序攻击"""
         return hmac.compare_digest(a.encode(), b.encode()) if a and b else False
 
+    @staticmethod
+    async def _parse_json(request: web.Request) -> dict:
+        """安全解析 JSON 请求体"""
+        try:
+            return await request.json()
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         """API 认证中间件（Bearer token 或 X-API-Key）"""
@@ -166,7 +174,7 @@ class TaskRouterHandler:
 
     async def _api_task(self, request: web.Request) -> web.Response:
         """执行单个任务（含配额检查 + 模型访问控制）"""
-        body = await request.json()
+        body = await self._parse_json(request)
         action = body.get("action", body.get("prompt", ""))
         text = body.get("text", body.get("input", ""))
         force = body.get("force", "")
@@ -213,7 +221,7 @@ class TaskRouterHandler:
 
     async def _api_estimate(self, request: web.Request) -> web.Response:
         """估算任务路由"""
-        body = await request.json()
+        body = await self._parse_json(request)
         action = body.get("action", body.get("prompt", ""))
         if not action:
             return web.json_response({"error": "缺少 action 参数"}, status=400)
@@ -222,7 +230,7 @@ class TaskRouterHandler:
 
     async def _api_decompose(self, request: web.Request) -> web.Response:
         """拆解复杂任务"""
-        body = await request.json()
+        body = await self._parse_json(request)
         action = body.get("action", body.get("prompt", ""))
         text = body.get("text", "")
         if not action:
@@ -238,7 +246,7 @@ class TaskRouterHandler:
 
     async def _api_batch(self, request: web.Request) -> web.Response:
         """批量任务处理（含批量限制 + 配额检查）"""
-        body = await request.json()
+        body = await self._parse_json(request)
         tasks = body.get("tasks", [])
         concurrency = body.get("concurrency", 1)
         if not tasks:
@@ -307,8 +315,6 @@ class TaskRouterHandler:
             "status": "healthy",
             "version": "6.0.0",
             "timestamp": datetime.now().isoformat(),
-            "local_model": CONFIG.local_model,
-            "cloud_configured": bool(CONFIG.cloud_api_key),
         })
 
     async def _api_history(self, request: web.Request) -> web.Response:
@@ -328,7 +334,7 @@ class TaskRouterHandler:
 
     async def _api_benchmark(self, request: web.Request) -> web.Response:
         """运行基准测试"""
-        body = await request.json()
+        body = await self._parse_json(request)
         model = body.get("model")
         registry = get_model_registry()
         registry.discover()
@@ -372,7 +378,7 @@ class TaskRouterHandler:
         if deny:
             return deny
 
-        body = await request.json()
+        body = await self._parse_json(request)
         key = body.get("key", "")
         team = body.get("team", "default")
         if not key:
@@ -425,7 +431,7 @@ class TaskRouterHandler:
 
     async def _api_openai_chat(self, request: web.Request) -> web.Response:
         """OpenAI 兼容的 Chat Completions API"""
-        body = await request.json()
+        body = await self._parse_json(request)
         messages = body.get("messages", [])
         if not messages:
             return web.json_response({
