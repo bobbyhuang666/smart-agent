@@ -264,9 +264,11 @@ class PrivacyConfig:
         if not os.path.exists(path):
             return cls()
         try:
+            import dataclasses as _dc
+            valid_fields = {f.name for f in _dc.fields(cls)}
             with open(path) as f:
                 data = json.load(f)
-            return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
+            return cls(**{k: v for k, v in data.items() if k in valid_fields})
         except (json.JSONDecodeError, TypeError):
             return cls()
 
