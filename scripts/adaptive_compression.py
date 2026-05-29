@@ -259,14 +259,18 @@ def compress_adaptive(
     scored_lines.sort(key=lambda x: x[0], reverse=True)
     kept_lines = scored_lines[:target_lines]
 
-    # 恢复原始顺序
-    # 简单方案：保留的行按原始顺序
-    kept_set = set(id(line) for _, line in kept_lines)
-    result_lines = []
-    for line in lines:
-        if id(line) in kept_set:
-            result_lines.append(line)
+    # 恢复原始顺序 — 用索引而非 id() 去重（id() 在字符串 interning 不确定时不可靠）
+    kept_indices = set()
+    kept_values = [line for _, line in kept_lines]
+    remaining = list(kept_values)
+    for i, line in enumerate(lines):
+        for j, kept_line in enumerate(remaining):
+            if line == kept_line:
+                kept_indices.add(i)
+                remaining.pop(j)
+                break
 
+    result_lines = [line for i, line in enumerate(lines) if i in kept_indices]
     compressed = "\n".join(result_lines)
     compressed_length = len(compressed)
 

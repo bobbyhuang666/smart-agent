@@ -19,6 +19,7 @@ import json
 import time
 import hmac
 import asyncio
+import threading
 from datetime import datetime
 
 from aiohttp import web
@@ -42,6 +43,49 @@ API_KEY = os.environ.get("TASKROUTER_API_KEY", "")
 API_KEYS_MULTI = [k.strip() for k in os.environ.get("TASKROUTER_API_KEYS", "").split(",") if k.strip()]
 PUBLIC_PATHS = {"/", "/api/health"}
 
+# 输入大小限制
+MAX_INPUT_LENGTH = int(os.environ.get("TASKROUTER_MAX_INPUT", "100000"))  # 100K 字符
+MAX_REQUEST_SIZE = int(os.environ.get("TASKROUTER_MAX_REQUEST_SIZE", str(2 * 1024 * 1024)))  # 2MB
+
+# 速率限制（每分钟请求数，0=不限制）
+RATE_LIMIT_RPM = int(os.environ.get("TASKROUTER_RATE_LIMIT_RPM", "60"))
+
+
+class TokenBucketRateLimiter:
+    """令牌桶速率限制器 — 按 API key / IP 限制请求频率"""
+
+    def __init__(self, rpm: int):
+        self.rpm = rpm
+        self._buckets: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        """检查是否允许请求。返回 True=放行，False=限速"""
+        if self.rpm <= 0:
+            return True
+        now = time.time()
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if not bucket:
+                self._buckets[key] = {"tokens": self.rpm - 1, "last": now}
+                return True
+            # 补充令牌
+            elapsed = now - bucket["last"]
+            bucket["tokens"] = min(self.rpm, bucket["tokens"] + elapsed * (self.rpm / 60.0))
+            bucket["last"] = now
+            if bucket["tokens"] >= 1:
+                bucket["tokens"] -= 1
+                return True
+            return False
+
+    def cleanup(self, max_age: float = 300) -> None:
+        """清理长时间未活跃的桶"""
+        cutoff = time.time() - max_age
+        with self._lock:
+            stale = [k for k, v in self._buckets.items() if v["last"] < cutoff]
+            for k in stale:
+                del self._buckets[k]
+
 
 # ─── API 处理器 ──────────────────────────────────────────────────
 
@@ -49,7 +93,8 @@ class TaskRouterHandler:
     """异步 HTTP API 处理器"""
 
     def __init__(self):
-        self.app = web.Application()
+        self.app = web.Application(client_max_size=MAX_REQUEST_SIZE)
+        self.rate_limiter = TokenBucketRateLimiter(RATE_LIMIT_RPM)
         self._setup_routes()
 
     def _setup_routes(self):
@@ -85,8 +130,9 @@ class TaskRouterHandler:
         # 仪表盘
         self.app.router.add_get("/", self._serve_dashboard)
 
-        # 中间件（顺序：先认证，再 CORS）
+        # 中间件（顺序：先认证，再速率限制，再 CORS）
         self.app.middlewares.append(self._auth_middleware)
+        self.app.middlewares.append(self._rate_limit_middleware)
         self.app.middlewares.append(self._cors_middleware)
 
     @staticmethod
@@ -96,11 +142,22 @@ class TaskRouterHandler:
 
     @staticmethod
     async def _parse_json(request: web.Request) -> dict:
-        """安全解析 JSON 请求体"""
+        """安全解析 JSON 请求体，含大小验证"""
         try:
-            return await request.json()
+            data = await request.json()
         except (json.JSONDecodeError, TypeError):
             return {}
+        if not isinstance(data, dict):
+            return {}
+        # 验证输入字段大小
+        for field in ("action", "prompt", "text", "input"):
+            val = data.get(field, "")
+            if isinstance(val, str) and len(val) > MAX_INPUT_LENGTH:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=MAX_REQUEST_SIZE,
+                    actual_size=len(val),
+                )
+        return data
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
@@ -149,11 +206,29 @@ class TaskRouterHandler:
                     request["team"] = "env"
                     return await handler(request)
 
-        log.warning("认证失败: %s %s (来源: %s, Key: %s...)", request.method, request.path, request.remote, provided_key[:8])
+        log.warning("认证失败: %s %s (来源: %s, Key: %s***)", request.method, request.path, request.remote, provided_key[:4])
         return web.json_response(
             {"error": "未授权：请提供有效的 API Key（Bearer token 或 X-API-Key header）"},
             status=401,
         )
+
+    @web.middleware
+    async def _rate_limit_middleware(self, request: web.Request, handler):
+        """速率限制中间件 — 按 API key 或 IP 限速"""
+        if request.path in PUBLIC_PATHS:
+            return await handler(request)
+        # 优先用 API key，其次用 IP
+        rate_key = request.get("api_key_config")
+        if rate_key and hasattr(rate_key, "key"):
+            rate_key = rate_key.key[:8]
+        else:
+            rate_key = request.remote or "unknown"
+        if not self.rate_limiter.allow(str(rate_key)):
+            return web.json_response(
+                {"error": f"请求过于频繁，限制 {RATE_LIMIT_RPM} 次/分钟"},
+                status=429,
+            )
+        return await handler(request)
 
     @web.middleware
     async def _cors_middleware(self, request: web.Request, handler):

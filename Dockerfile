@@ -15,6 +15,8 @@ RUN useradd -r -s /bin/false appuser && \
     mkdir -p /data/cache && chown appuser:appuser /data/cache
 
 # Environment
+# 安全提示：生产环境务必设置 TASKROUTER_API_KEY，否则 API 无需认证即可访问
+#   docker run -e TASKROUTER_API_KEY=your-secret-key ...
 ENV PYTHONUNBUFFERED=1
 ENV TASK_ROUTER_CACHE=/data/cache
 VOLUME ["/data/cache"]

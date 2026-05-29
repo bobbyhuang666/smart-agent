@@ -233,12 +233,22 @@ def enrich_prompt_with_examples(prompt: str, task_type: str, text: str) -> str:
 
 # ─── 使用日志 ──────────────────────────────────────────────────
 
+def _scrub_pii(text: str) -> str:
+    """对日志中的文本进行 PII 脱敏（延迟导入避免循环依赖）"""
+    try:
+        from privacy import get_privacy_filter
+        result = get_privacy_filter().anonymize(text)
+        return result.text
+    except Exception:
+        return text
+
+
 def log_usage(task: Task) -> None:
     log_file = os.path.join(CONFIG.cache_dir, "usage.jsonl")
     entry = {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "date": time.strftime("%Y-%m-%d"),
-        "action": task.action[:100],
+        "action": _scrub_pii(task.action[:100]),
         "route": task.route,
         "model": task.model_used,
         "tokens_input": task.tokens_input,

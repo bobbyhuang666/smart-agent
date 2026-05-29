@@ -284,13 +284,21 @@ class ActiveLearner:
             self._task_stats[tt]["predictions"].append(e.get("predicted_prob", 0.5))
             self._task_stats[tt]["outcomes"].append(e.get("success", False))
 
+    # 每个任务类型最多保留最近 N 条记录，防止内存无限增长
+    MAX_STATS_PER_TYPE = 1000
+
     def record(self, task_type: str, predicted_prob: float, success: bool) -> None:
         """记录一次预测和结果"""
         with self._lock:
             if task_type not in self._task_stats:
                 self._task_stats[task_type] = {"predictions": [], "outcomes": []}
-            self._task_stats[task_type]["predictions"].append(predicted_prob)
-            self._task_stats[task_type]["outcomes"].append(success)
+            stats = self._task_stats[task_type]
+            stats["predictions"].append(predicted_prob)
+            stats["outcomes"].append(success)
+            # 裁剪：保留最近的数据
+            if len(stats["predictions"]) > self.MAX_STATS_PER_TYPE:
+                stats["predictions"] = stats["predictions"][-self.MAX_STATS_PER_TYPE:]
+                stats["outcomes"] = stats["outcomes"][-self.MAX_STATS_PER_TYPE:]
 
             entry = {
                 "time": time.strftime("%Y-%m-%dT%H:%M:%S"),

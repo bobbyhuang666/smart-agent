@@ -11,6 +11,7 @@
 import os
 import json
 import time
+import threading
 import subprocess
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -98,6 +99,9 @@ class ModelRegistry:
         self.registry_file = os.path.join(self.cache_dir, "model_registry.json")
         os.makedirs(self.cache_dir, exist_ok=True)
         self.models: dict[str, ModelProfile] = {}
+        self._lock = threading.Lock()
+        self._update_count = 0
+        self._save_interval = 10  # 每 N 次更新才写磁盘
         self._load()
 
     def _load(self):
@@ -117,8 +121,10 @@ class ModelRegistry:
         data = {}
         for name, profile in self.models.items():
             data[name] = asdict(profile)
-        with open(self.registry_file, "w") as f:
+        tmp = self.registry_file + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.registry_file)
 
     def discover(self) -> list[str]:
         """
@@ -285,33 +291,43 @@ class ModelRegistry:
     def update_after_call(self, model_name: str, success: bool,
                           latency_ms: float = 0, tokens_in: int = 0,
                           tokens_out: int = 0):
-        """调用后更新模型统计"""
-        if model_name not in self.models:
-            return
-        profile = self.models[model_name]
-        profile.total_calls += 1
-        profile.last_used = time.strftime("%Y-%m-%dT%H:%M:%S")
+        """调用后更新模型统计（批量写盘）"""
+        with self._lock:
+            if model_name not in self.models:
+                return
+            profile = self.models[model_name]
+            profile.total_calls += 1
+            profile.last_used = time.strftime("%Y-%m-%dT%H:%M:%S")
 
-        # 更新延迟（指数移动平均）
-        if latency_ms > 0:
-            if profile.avg_latency_ms == 0:
-                profile.avg_latency_ms = latency_ms
-            else:
-                profile.avg_latency_ms = profile.avg_latency_ms * 0.8 + latency_ms * 0.2
+            # 更新延迟（指数移动平均）
+            if latency_ms > 0:
+                if profile.avg_latency_ms == 0:
+                    profile.avg_latency_ms = latency_ms
+                else:
+                    profile.avg_latency_ms = profile.avg_latency_ms * 0.8 + latency_ms * 0.2
 
-        # 更新 tokens/s
-        if latency_ms > 0 and tokens_out > 0:
-            tps = tokens_out / (latency_ms / 1000)
-            if profile.tokens_per_second == 0:
-                profile.tokens_per_second = tps
-            else:
-                profile.tokens_per_second = profile.tokens_per_second * 0.8 + tps * 0.2
+            # 更新 tokens/s
+            if latency_ms > 0 and tokens_out > 0:
+                tps = tokens_out / (latency_ms / 1000)
+                if profile.tokens_per_second == 0:
+                    profile.tokens_per_second = tps
+                else:
+                    profile.tokens_per_second = profile.tokens_per_second * 0.8 + tps * 0.2
 
-        # 更新成功率（指数移动平均）
-        success_val = 1.0 if success else 0.0
-        profile.success_rate = profile.success_rate * 0.9 + success_val * 0.1
+            # 更新成功率（指数移动平均）
+            success_val = 1.0 if success else 0.0
+            profile.success_rate = profile.success_rate * 0.9 + success_val * 0.1
 
-        self._save()
+            # 批量写盘：每 N 次更新才持久化
+            self._update_count += 1
+            if self._update_count >= self._save_interval:
+                self._update_count = 0
+                self._save()
+
+    def flush(self) -> None:
+        """强制持久化到磁盘"""
+        with self._lock:
+            self._save()
 
     def run_benchmark(self, model_name: str = None, capabilities: list = None) -> dict:
         """

@@ -281,6 +281,8 @@ class ThompsonSamplingRouter:
         self.forgetting_factor = forgetting_factor
         self.cache_dir = cache_dir
         self._lock = threading.Lock()
+        self._update_count = 0
+        self._save_interval = 10  # 每 N 次更新才写磁盘
 
         # 每个臂的贝叶斯线性回归参数
         # 使用 Normal-Inverse-Gamma 先验
@@ -462,6 +464,15 @@ class ThompsonSamplingRouter:
                 mean_reward = params["sum_reward"] / n
                 params["noise_var"] = max(0.01, params["sum_reward_sq"] / n - mean_reward ** 2)
 
+            # 批量写盘：每 N 次更新才持久化
+            self._update_count += 1
+            if self._update_count >= self._save_interval:
+                self._update_count = 0
+                self._save()
+
+    def flush(self) -> None:
+        """强制持久化当前参数到磁盘"""
+        with self._lock:
             self._save()
 
     def get_stats(self) -> dict:

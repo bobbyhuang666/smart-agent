@@ -269,6 +269,7 @@ class TestThompsonSamplingRouter:
         router1 = ThompsonSamplingRouter(cache_dir=tmp_dir)
         features = [0.5] * 8
         router1.update("local", features, 1.0)
+        router1.flush()  # 批量写盘模式下需显式 flush
 
         # 重新加载
         router2 = ThompsonSamplingRouter(cache_dir=tmp_dir)

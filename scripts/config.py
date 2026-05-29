@@ -4,6 +4,7 @@
 
 import os
 import json
+import threading
 from pathlib import Path
 from dataclasses import dataclass, field, fields
 from typing import Optional
@@ -137,16 +138,19 @@ TASK_TO_CAPABILITY: dict[str, str] = {
 }
 
 
-# ─── 全局配置实例（延迟初始化）──────────────────────────────────
+# ─── 全局配置实例（延迟初始化，线程安全）────────────────────────
 
 _config: Optional[RouterConfig] = None
+_config_lock = threading.Lock()
 
 
 def get_config() -> RouterConfig:
     """获取全局配置实例"""
     global _config
     if _config is None:
-        _config = RouterConfig.from_env()
+        with _config_lock:
+            if _config is None:
+                _config = RouterConfig.from_env()
     return _config
 
 

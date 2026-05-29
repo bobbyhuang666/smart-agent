@@ -15,6 +15,7 @@
 
 import os
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -490,15 +491,18 @@ class StrategyTracker:
         }
 
 
-# 全局实例（延迟初始化）
+# 全局实例（延迟初始化，线程安全）
 _tracker: Optional[StrategyTracker] = None
+_tracker_lock = threading.Lock()
 
 
 def get_strategy_tracker(cache_dir: Optional[str] = None) -> StrategyTracker:
     global _tracker
     if _tracker is None:
-        if cache_dir is None:
-            from config import get_config
-            cache_dir = get_config().cache_dir
-        _tracker = StrategyTracker(cache_dir)
+        with _tracker_lock:
+            if _tracker is None:
+                if cache_dir is None:
+                    from config import get_config
+                    cache_dir = get_config().cache_dir
+                _tracker = StrategyTracker(cache_dir)
     return _tracker
