@@ -665,3 +665,66 @@ class TestConformalizedRouter:
         assert "active_learner" in signals
         assert "tqbc" in signals
         assert "raw_fusion" in signals
+
+    def test_sliding_window_overflow(self, tmp_dir):
+        """滑动窗口超过 window_size 后只保留最新数据"""
+        router = ConformalizedRouter(cache_dir=tmp_dir, window_size=10)
+
+        # 添加 25 个分数（超过窗口大小）
+        for i in range(25):
+            router.calibrator.add_score(i / 25.0, was_correct=True)
+
+        # 窗口应只保留最近 10 个
+        assert len(router.calibrator.scores) == 10
+        # 最旧的分数（0/25, 1/25, ...）应被丢弃
+        assert router.calibrator.scores[0][0] >= 15 / 25.0
+
+    def test_concurrent_decide(self, router):
+        """并发 decide 调用不崩溃"""
+        import threading
+
+        errors = []
+
+        def do_decide():
+            try:
+                for _ in range(10):
+                    router.decide(
+                        cascade_decision=make_cascade_decision(),
+                        tqbc_decision=make_tqbc_decision(),
+                        ml_prediction=make_ml_prediction(),
+                        active_verify=False,
+                        features=[0.5] * 8,
+                        task_type="test",
+                        raw_should_escalate=False,
+                        quantile_features=MockQuantileFeatures(),
+                    )
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=do_decide) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Concurrent errors: {errors}"
+
+    def test_cold_start_no_crash(self, tmp_dir):
+        """冷启动（无校准数据）不崩溃"""
+        router = ConformalizedRouter(cache_dir=tmp_dir, window_size=50)
+
+        decision = router.decide(
+            cascade_decision=make_cascade_decision(),
+            tqbc_decision=make_tqbc_decision(),
+            ml_prediction=make_ml_prediction(),
+            active_verify=False,
+            features=[0.5] * 8,
+            task_type="test",
+            raw_should_escalate=False,
+            quantile_features=MockQuantileFeatures(),
+        )
+
+        # 冷启动应返回有效决策
+        assert decision.route in ("local", "cloud")
+        assert 0 <= decision.nonconformity_score <= 1
+        assert decision.alpha > 0
