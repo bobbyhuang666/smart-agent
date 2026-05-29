@@ -370,20 +370,28 @@ def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
         log.debug("模型注册表查询失败: %s", e)
 
     prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
-    prompt = enrich_prompt_with_examples(prompt, task_type, clean_text)
+
+    # 获取动态示例（只查询一次，同时用于 prompt 注入和策略选择）
+    examples_str = ""
+    has_examples = False
+    examples = []
+    capability = TASK_TO_CAPABILITY.get(task_type, "")
+    if capability:
+        examples = get_dynamic_examples(capability, store, limit=2)
+    if examples:
+        has_examples = True
+        example_block = "\n".join(
+            f"示例: {e.get('prompt', '')[:50]} → {e.get('response', '')[:50]}"
+            for e in examples
+        )
+        prompt = f"{example_block}\n\n{prompt}"
+        examples_str = "\n".join(
+            f"{e.get('prompt', '')[:50]} → {e.get('response', '')[:50]}"
+            for e in examples
+        )
 
     # 推理策略选择：统一入口（关键词 + Token 分位数 + 历史反馈）
     routing_result = estimate_complexity(task)
-    examples_str = ""
-    has_examples = False
-    if task_type:
-        examples = get_dynamic_examples(task_type, store, limit=2)
-        if examples:
-            has_examples = True
-            examples_str = "\n".join(
-                f"{e.get('prompt', '')[:50]} → {e.get('response', '')[:50]}"
-                for e in examples
-            )
 
     # 第一次选择：用关键词 + 复杂度（模型调用前没有 logprobs）
     strategy_decision = select_strategy(
