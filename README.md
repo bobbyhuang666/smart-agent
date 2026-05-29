@@ -261,10 +261,10 @@ python3 scripts/api_server.py --port 8930
 ## 配置云端 API
 
 ```bash
-# DeepSeek（推荐，性价比高）
+# DeepSeek V4 Flash（推荐，性价比高）
 export CLOUD_API_URL="https://api.deepseek.com"
 export CLOUD_API_KEY="sk-xxxxxxxx"
-export CLOUD_MODEL="deepseek-chat"
+export CLOUD_MODEL="deepseek-v4-flash"
 
 # Claude
 export CLOUD_API_URL="https://api.anthropic.com"
