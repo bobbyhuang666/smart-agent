@@ -331,4 +331,4 @@ docker run -p 8930:8930 -e TASKROUTER_API_KEY=your-secret-key taskrouter
 
 ## License
 
-MIT
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
