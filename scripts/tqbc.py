@@ -297,6 +297,8 @@ class ThompsonSamplingRouter:
                 "noise_var": noise_var,
                 # 累计 reward 平方（用于噪声方差估计）
                 "sum_reward_sq": 0.0,
+                # 累计 reward（用于均值计算）
+                "sum_reward": 0.0,
             }
 
         # 加载历史参数
@@ -447,29 +449,18 @@ class ThompsonSamplingRouter:
                 K_i = prec_inv[i] * features[i] / denominator
                 # 更新均值
                 params["mean"][i] += K_i * error
-                # 更新精度
-                prec_inv[i] = prec_inv[i] * (1 - K_i * features[i])
+                # 更新精度（下界保护，防止负精度破坏后验正定性）
+                prec_inv[i] = max(1e-6, prec_inv[i] * (1 - K_i * features[i]))
 
             params["n_obs"] += 1
+            params["sum_reward"] += reward
             params["sum_reward_sq"] += reward ** 2
 
             # 在线更新每臂噪声方差：var = E[r^2] - E[r]^2
             n = params["n_obs"]
             if n >= 5:
-                mean_reward = params.get("sum_reward", 0.0) / n
+                mean_reward = params["sum_reward"] / n
                 params["noise_var"] = max(0.01, params["sum_reward_sq"] / n - mean_reward ** 2)
-            params["sum_reward"] = params.get("sum_reward", 0.0) + reward
-
-            # 更新噪声方差估计（最大似然）
-            if params["n_obs"] > 10:
-                avg_reward = sum(
-                    self._predict_arm(arm, [1.0 if i == j else 0.0
-                                           for j in range(self.n_features)])
-                    for i in range(self.n_features)
-                ) / self.n_features
-                self.noise_var = max(0.01, min(1.0,
-                    (params["sum_reward_sq"] / params["n_obs"]) - avg_reward ** 2
-                ))
 
             self._save()
 
@@ -483,7 +474,7 @@ class ThompsonSamplingRouter:
                 "weights": [round(w, 4) for w in p["mean"]],
                 "weight_norm": round(math.sqrt(sum(w**2 for w in p["mean"])), 4),
                 "avg_uncertainty": round(
-                    sum(p["precision_inv"]) / len(p["precision_inv"]) * self.noise_var, 4
+                    sum(p["precision_inv"]) / len(p["precision_inv"]) * p.get("noise_var", self.noise_var), 4
                 ),
             }
         return {

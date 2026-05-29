@@ -366,8 +366,8 @@ def _run_local_single(task: Task, clean_action: str, clean_text: str) -> dict:
                 best = registry.select_best(capability, prefer_speed=True)
                 if best and best.name != CONFIG.local_model:
                     selected_model = best.name
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("模型注册表查询失败: %s", e)
 
     prompt = build_optimized_prompt(task_type, clean_action, clean_text, task.files)
     prompt = enrich_prompt_with_examples(prompt, task_type, clean_text)
@@ -691,8 +691,8 @@ def _finalize_task(task: Task) -> None:
             status="success" if task.route != "error" else "failure",
             duration_ms=task.time_ms,
         ))
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("审计日志写入失败: %s", e)
 
 
 def run_task(task: Task, force_route: str = "") -> Task:
