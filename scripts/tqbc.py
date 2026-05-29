@@ -589,8 +589,8 @@ class BayesianConfidenceCalibrator:
             calibrated = 1.0 / (1.0 + math.exp(-z))
 
             # Calibeating 分箱校正（ICML 2023）
-            # 如果对应分箱有足够数据，用经验准确率替换 Platt 输出
-            bin_idx = min(self.N_BINS - 1, int(calibrated * self.N_BINS))
+            # 使用 raw_confidence 分箱（与 record 一致），避免 Platt 变换导致分箱偏移
+            bin_idx = min(self.N_BINS - 1, int(raw_confidence * self.N_BINS))
             bin_data = self._bins[bin_idx]
             if bin_data[2] >= 5:  # 至少 5 个样本才校正
                 empirical_acc = bin_data[1] / bin_data[2]
