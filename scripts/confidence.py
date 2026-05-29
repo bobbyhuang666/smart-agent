@@ -323,7 +323,7 @@ class CascadeDecision:
             "was_correct": was_correct,
             "escalated": escalated,
         }
-        append_jsonl(self.history_file, entry)
+        append_jsonl(self.history_file, entry, max_lines=10000)
 
         # 只有未升级的结果才用于校准（升级的结果由云端处理）
         if not escalated:

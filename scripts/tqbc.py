@@ -906,7 +906,7 @@ class TQBCRouter:
             "task_type": task_type,
             "arm": arm,
         }
-        append_jsonl(self.history_file, entry)
+        append_jsonl(self.history_file, entry, max_lines=10000)
 
     def get_stats(self) -> dict:
         """获取 TQBC 统计"""

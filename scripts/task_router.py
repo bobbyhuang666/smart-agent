@@ -247,7 +247,7 @@ def log_usage(task: Task) -> None:
         "time_ms": task.time_ms,
     }
     with _log_lock:
-        append_jsonl(log_file, entry)
+        append_jsonl(log_file, entry, max_lines=10000)
 
 
 def calc_cost(input_tokens: int, output_tokens: int) -> float:
@@ -641,7 +641,7 @@ def _run_local(task: Task) -> Task:
     return task
 
 
-def _run_cloud(task: Task, force_route: str) -> Task:
+def _run_cloud(task: Task, force_route: str, _depth: int = 0) -> Task:
     """执行云端任务（含递归拆解）"""
     if not force_route:
         decision = estimate_complexity(task, base_threshold=CONFIG.base_threshold)
@@ -656,7 +656,7 @@ def _run_cloud(task: Task, force_route: str) -> Task:
                 st_action = st.get("action", st.get("type", ""))
                 st_text = st.get("text", task.text)
                 st_task = Task(action=st_action, text=st_text)
-                st_result = run_task(st_task)
+                st_result = run_task(st_task, _depth=_depth + 1)
                 outputs.append(f"[{st_action[:30]}]({st_result.route})\n{st_result.output}")
                 task.tokens_input += st_result.tokens_input
                 task.tokens_output += st_result.tokens_output
@@ -703,8 +703,12 @@ def _finalize_task(task: Task) -> None:
         log.warning("审计日志写入失败: %s", e)
 
 
-def run_task(task: Task, force_route: str = "") -> Task:
+def run_task(task: Task, force_route: str = "", _depth: int = 0) -> Task:
     """执行单个任务（核心入口）"""
+    if _depth > CONFIG.max_recurse_depth:
+        task.output = f"[递归深度超限] 最大深度 {CONFIG.max_recurse_depth}"
+        task.route = "error"
+        return task
     # 1. 路由决策（使用可学习权重）
     wt = _get_weight_tracker()
     routing_score = 0.0
@@ -730,7 +734,7 @@ def run_task(task: Task, force_route: str = "") -> Task:
     if task.route == "local":
         task = _run_local(task)
     else:
-        task = _run_cloud(task, force_route)
+        task = _run_cloud(task, force_route, _depth=_depth)
 
     # 4. 收尾（缓存、日志、审计）
     _finalize_task(task)

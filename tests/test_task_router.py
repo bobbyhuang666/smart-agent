@@ -873,6 +873,30 @@ class TestAuthMiddleware:
         assert h._safe_eq(a, b) is hmac.compare_digest(a.encode(), b.encode())
 
 
+# ─── 递归深度限制 ──────────────────────────────────────────────
+
+
+class TestRecursionDepthLimit:
+    def test_run_task_respects_depth_limit(self):
+        """run_task 在超过最大递归深度时返回错误"""
+        from task_router import run_task, CONFIG
+        task = Task(action="测试深度限制", text="test")
+        result = run_task(task, _depth=CONFIG.max_recurse_depth + 1)
+        assert result.route == "error"
+        assert "递归深度超限" in result.output
+
+    def test_run_task_depth_zero_does_not_trigger(self):
+        """depth=0 不触发递归限制"""
+        from task_router import run_task
+        task = Task(action="测试", text="")
+        try:
+            result = run_task(task, _depth=0)
+        except Exception:
+            # 连接失败等异常不算递归超限
+            return
+        assert "递归深度超限" not in (result.output or "")
+
+
 # ─── 运行入口 ─────────────────────────────────────────────────
 
 if __name__ == "__main__":

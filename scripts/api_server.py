@@ -100,15 +100,13 @@ class TaskRouterHandler:
         if request.path in PUBLIC_PATHS:
             return await handler(request)
 
-        # 提取请求中的 Key
+        # 提取请求中的 Key（仅支持 Header，不支持 query string 防止日志泄露）
         provided_key = ""
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             provided_key = auth_header[7:]
         elif request.headers.get("X-API-Key"):
             provided_key = request.headers.get("X-API-Key")
-        elif request.query.get("api_key"):
-            provided_key = request.query.get("api_key")
 
         if not provided_key:
             # 没有提供 Key，检查是否启用认证
