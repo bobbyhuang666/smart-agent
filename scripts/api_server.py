@@ -307,7 +307,7 @@ class TaskRouterHandler:
         """健康检查"""
         return web.json_response({
             "status": "healthy",
-            "version": "4.5.0",
+            "version": "6.0.0",
             "timestamp": datetime.now().isoformat(),
             "local_model": CONFIG.local_model,
             "cloud_configured": bool(CONFIG.cloud_api_key),
@@ -736,7 +736,7 @@ def start_server(host="127.0.0.1", port=8930):
     app = handler.app
 
     auth_status = "已启用" if API_KEY else "未设置（开放访问）"
-    log.info("TaskRouter API v4.5.0 启动: %s:%d, 认证: %s", host, port, auth_status)
+    log.info("TaskRouter API v6.0.0 启动: %s:%d, 认证: %s", host, port, auth_status)
 
     print("TaskRouter API 服务器启动 (异步)")
     print(f"  地址: http://{host}:{port}")
