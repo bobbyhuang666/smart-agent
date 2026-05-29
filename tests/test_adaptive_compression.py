@@ -2,7 +2,6 @@
 自适应 Prompt 压缩器测试
 """
 
-import pytest
 from adaptive_compression import (
     estimate_importance,
     compress_adaptive,

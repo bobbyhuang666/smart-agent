@@ -7,12 +7,10 @@ TQBC（Token-Quantile Bayesian Cascade）测试
 3. 贝叶斯置信度校准
 """
 
-import math
 import pytest
 import tempfile
 
 from tqbc import (
-    TokenQuantileFeatures,
     extract_quantile_features,
     extract_quantile_features_from_text,
     quantiles_to_feature_vector,
@@ -134,8 +132,8 @@ class TestTokenQuantileFeatures:
         assert diff < 1.0, f"分位数方法应对长度鲁棒: diff={diff}"
 
         # 传统平均方法会因长度不同而偏差更大
-        short_avg = sum(e for e in [lp.get("logprob", -10) for lp in short_logprobs]) / len(short_logprobs)
-        long_avg = sum(e for e in [lp.get("logprob", -10) for lp in long_logprobs]) / len(long_logprobs)
+        sum(e for e in [lp.get("logprob", -10) for lp in short_logprobs]) / len(short_logprobs)
+        sum(e for e in [lp.get("logprob", -10) for lp in long_logprobs]) / len(long_logprobs)
         # 平均方法更敏感于分布变化，但分位数更稳定
         assert short_qf.q50_margin >= 0  # 分位数方法应产生有效值
 
@@ -220,14 +218,14 @@ class TestThompsonSamplingRouter:
         features = [0.5] * 8
 
         # 初始选择
-        initial = router.select_arm(features)
+        router.select_arm(features)
 
         # 反馈本地成功
         for _ in range(20):
             router.update("local", features, 1.0)
 
         # 学习后，本地应更受青睐
-        result = router.select_arm(features)
+        router.select_arm(features)
         stats = router.get_stats()
         assert stats["arms"]["local"]["n_observations"] == 20
 
@@ -247,7 +245,7 @@ class TestThompsonSamplingRouter:
             router.update("cloud", features_bad, 1.0)
 
         result_good = router.select_arm(features_good)
-        result_bad = router.select_arm(features_bad)
+        router.select_arm(features_bad)
 
         # 探索加成应存在（非零）
         for arm in ThompsonSamplingRouter.ARMS:
@@ -259,7 +257,7 @@ class TestThompsonSamplingRouter:
         新特征应有较大的后验方差。
         """
         features = [0.5] * 8
-        result = router.select_arm(features)
+        router.select_arm(features)
 
         stats = router.get_stats()
         # 初始方差应较大（v_sq = 1.0）
@@ -288,7 +286,7 @@ class TestThompsonSamplingRouter:
             router.update("local", features, 1.0)
 
         stats_before = router.get_stats()
-        local_nobs = stats_before["arms"]["local"]["n_observations"]
+        stats_before["arms"]["local"]["n_observations"]
 
         # 遗忘因子应该已经衰减了一些精度
         assert router.forgetting_factor < 1.0

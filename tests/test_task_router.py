@@ -11,22 +11,20 @@ TaskRouter 核心功能测试
 - 审计日志
 """
 
-import os
 import time
 import json
 import pytest
-import tempfile
 
 from task_router import (
     Task, estimate_complexity, detect_task_type, preprocess_text,
-    postprocess_output, validate_local_output,
+    validate_local_output,
     calc_cost, calc_savings, decompose_complex_task,
     _recursive_decompose,
 )
 from prompts import compress_prompt_tokens
 from prompts import PROMPT_TEMPLATES
 from model_registry import ModelRegistry, ModelProfile
-from audit import AuditLogger, AuditEvent, QuotaManager, QuotaConfig
+from audit import AuditLogger, AuditEvent, QuotaManager
 
 
 # ─── 任务复杂度估算 ─────────────────────────────────────────────
@@ -357,7 +355,7 @@ class TestSemanticCache:
 
     def test_normalize(self):
         from task_router import SemanticCache
-        cache = SemanticCache.__new__(SemanticCache)
+        SemanticCache.__new__(SemanticCache)
         assert SemanticCache._normalize("  Hello  World  ") == "helloworld"
         assert SemanticCache._normalize("苹果，香蕉") == "苹果,香蕉"
 

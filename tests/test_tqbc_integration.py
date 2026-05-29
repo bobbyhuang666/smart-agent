@@ -5,9 +5,9 @@ TQBC 端到端集成测试 — 验证四层决策融合
 import pytest
 import tempfile
 
-from tqbc import TQBCRouter, extract_quantile_features
+from tqbc import TQBCRouter
 from meta_learner import MetaLearner, ActiveLearner, extract_routing_features
-from confidence import CascadeDecision, extract_confidence
+from confidence import CascadeDecision
 
 
 def _make_logprobs(n: int, confident: bool = True) -> list[dict]:
@@ -40,7 +40,7 @@ class TestFourLayerFusion:
         """复现四层融合逻辑"""
         cascade = CascadeDecision(tmp_dir, escalation_threshold=0.4)
         ml = MetaLearner(tmp_dir, decision_threshold=0.5)
-        al = ActiveLearner(tmp_dir)
+        ActiveLearner(tmp_dir)
 
         cascade_result = cascade.should_escalate(conf_data)
         ml_prediction = ml.predict(features)

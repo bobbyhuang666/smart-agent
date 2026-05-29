@@ -5,7 +5,6 @@ A3M 路由准确率基准测试 — 50+ 标注用例
 每个用例标注了期望路由 (local/cloud) 和任务类型。
 """
 
-import pytest
 from routing import Task, estimate_complexity, detect_task_type, decompose_complex_task
 from prompts import PROMPT_TEMPLATES
 
@@ -302,9 +301,8 @@ class TestRoutingAccuracy:
 
     def test_learnable_weights(self):
         """A3M 可学习权重系统测试"""
-        from weights import A3MWeights, WeightTracker
+        from weights import WeightTracker
         import tempfile
-        import os
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tracker = WeightTracker(tmpdir)

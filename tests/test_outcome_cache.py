@@ -10,7 +10,6 @@
 
 import pytest
 import tempfile
-import os
 
 from outcome_cache import OutcomeAwareCache, get_outcome_cache
 
