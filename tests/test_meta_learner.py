@@ -10,7 +10,7 @@ Meta-Learner 测试
 import pytest
 import tempfile
 
-from meta_learner import (
+from task_router.meta_learner import (
     extract_routing_features,
     OnlineLogisticRegression,
     MetaLearner,

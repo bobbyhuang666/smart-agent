@@ -10,7 +10,7 @@ TQBC（Token-Quantile Bayesian Cascade）测试
 import pytest
 import tempfile
 
-from tqbc import (
+from task_router.tqbc import (
     extract_quantile_features,
     extract_quantile_features_from_text,
     quantiles_to_feature_vector,
@@ -547,7 +547,7 @@ class TestTQBCIntegration:
 
     def test_compatible_with_confidence_api(self, tmp_dir):
         """TQBC 应与现有 confidence 模块共存"""
-        from confidence import extract_confidence, CascadeDecision
+        from task_router.confidence import extract_confidence, CascadeDecision
 
         logprobs = _make_confident_logprobs(10)
 
@@ -566,7 +566,7 @@ class TestTQBCIntegration:
 
     def test_compatible_with_meta_learner(self, tmp_dir):
         """TQBC 应与 Meta-Learner 共存"""
-        from meta_learner import MetaLearner, extract_routing_features
+        from task_router.meta_learner import MetaLearner, extract_routing_features
 
         ml = MetaLearner(tmp_dir)
         tqbc = TQBCRouter(tmp_dir)
@@ -582,8 +582,8 @@ class TestTQBCIntegration:
 
     def test_both_systems_can_coexist(self, tmp_dir):
         """两个系统应能同时运行、独立学习"""
-        from confidence import CascadeDecision
-        from meta_learner import MetaLearner
+        from task_router.confidence import CascadeDecision
+        from task_router.meta_learner import MetaLearner
 
         cascade = CascadeDecision(tmp_dir)
         ml = MetaLearner(tmp_dir)

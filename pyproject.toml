@@ -5,23 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "task-router"
 version = "6.0.0"
-description = "自进化的企业级 AI 成本优化引擎 — 自动路由任务到最佳模型，通过蒸馏闭环让本地模型持续变强"
+description = "基于 Thompson Sampling 的自适应 LLM 路由引擎 — 简单任务走本地免费，复杂任务走云端按需付费"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "TaskRouter Team"},
 ]
-keywords = ["ai", "routing", "cost-optimization", "distillation", "ollama"]
+keywords = ["ai", "routing", "cost-optimization", "distillation", "ollama", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -38,13 +36,14 @@ dev = [
 ]
 
 [project.scripts]
-task-router = "task_router:main"
+sma = "task_router.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["scripts"]
+where = ["src"]
+include = ["task_router*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
-pythonpath = ["scripts"]
+pythonpath = ["src"]

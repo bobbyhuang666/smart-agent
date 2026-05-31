@@ -13,7 +13,7 @@ RouterConfig 测试
 import json
 
 
-from config import (
+from task_router.config import (
     RouterConfig,
     TASK_TO_CAPABILITY,
     get_config,

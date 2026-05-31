@@ -12,8 +12,8 @@
 import pytest
 import tempfile
 
-from meta_learner import MetaLearner, ActiveLearner, extract_routing_features
-from confidence import CascadeDecision
+from task_router.meta_learner import MetaLearner, ActiveLearner, extract_routing_features
+from task_router.confidence import CascadeDecision
 
 
 class TestThreeLayerFusion:

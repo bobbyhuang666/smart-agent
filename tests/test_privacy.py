@@ -12,7 +12,7 @@ Privacy 模块测试
 - quick_anonymize/quick_deanonymize
 """
 
-from privacy import (
+from task_router.privacy import (
     PrivacyFilter,
     PrivacyConfig,
     PIIMatch,

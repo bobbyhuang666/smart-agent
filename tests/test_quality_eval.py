@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-from quality_eval import (
+from task_router.quality_eval import (
     EvalCase,
     EvalResult,
     QualityEvaluator,

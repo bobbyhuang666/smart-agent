@@ -9,7 +9,7 @@
 """
 
 import pytest
-from adaptive_reasoning import (
+from task_router.adaptive_reasoning import (
     AdaptiveStrategyDecision,
     TOKEN_BUDGET,
     select_adaptive_strategy,

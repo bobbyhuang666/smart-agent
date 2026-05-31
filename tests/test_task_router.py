@@ -15,16 +15,16 @@ import time
 import json
 import pytest
 
-from task_router import (
+from task_router.task_router import (
     Task, estimate_complexity, detect_task_type, preprocess_text,
     validate_local_output,
     calc_cost, calc_savings, decompose_complex_task,
     _recursive_decompose,
 )
-from prompts import compress_prompt_tokens
-from prompts import PROMPT_TEMPLATES
-from model_registry import ModelRegistry, ModelProfile
-from audit import AuditLogger, AuditEvent, QuotaManager
+from task_router.prompts import compress_prompt_tokens
+from task_router.prompts import PROMPT_TEMPLATES
+from task_router.model_registry import ModelRegistry, ModelProfile
+from task_router.audit import AuditLogger, AuditEvent, QuotaManager
 
 
 # ─── 任务复杂度估算 ─────────────────────────────────────────────
@@ -354,20 +354,20 @@ class TestSemanticCache:
     """测试语义缓存"""
 
     def test_normalize(self):
-        from task_router import SemanticCache
+        from task_router.cache import SemanticCache
         SemanticCache.__new__(SemanticCache)
         assert SemanticCache._normalize("  Hello  World  ") == "helloworld"
         assert SemanticCache._normalize("苹果，香蕉") == "苹果,香蕉"
 
     def test_trigrams(self):
-        from task_router import SemanticCache
+        from task_router.cache import SemanticCache
         cache = SemanticCache.__new__(SemanticCache)
         cache.threshold = 0.85
         tri = cache._trigrams("hello world")
         assert len(tri) > 0
 
     def test_jaccard(self):
-        from task_router import SemanticCache
+        from task_router.cache import SemanticCache
         cache = SemanticCache.__new__(SemanticCache)
         a = {"abc", "bcd", "cde"}
         b = {"abc", "bcd", "def"}
@@ -382,13 +382,13 @@ class TestCircuitBreakerStates:
     """测试 CircuitBreaker 三态转换: CLOSED → OPEN → HALF_OPEN → CLOSED"""
 
     def test_initial_state_closed(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=3, cooldown_seconds=1)
         assert cb.state == CircuitBreaker.STATE_CLOSED
         assert cb.allow_request() is True
 
     def test_trips_to_open_after_max_failures(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=3, cooldown_seconds=60)
         for _ in range(3):
             cb.record_failure()
@@ -396,7 +396,7 @@ class TestCircuitBreakerStates:
         assert cb.allow_request() is False
 
     def test_half_open_after_cooldown(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=2, cooldown_seconds=0)
         cb.record_failure()
         cb.record_failure()
@@ -406,7 +406,7 @@ class TestCircuitBreakerStates:
         assert cb.state == CircuitBreaker.STATE_HALF_OPEN
 
     def test_half_open_success_closes(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=2, cooldown_seconds=0)
         cb.record_failure()
         cb.record_failure()
@@ -416,7 +416,7 @@ class TestCircuitBreakerStates:
         assert cb.failures == 0
 
     def test_half_open_failure_reopens(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=2, cooldown_seconds=60)
         cb.record_failure()
         cb.record_failure()
@@ -428,14 +428,14 @@ class TestCircuitBreakerStates:
         assert cb.state == CircuitBreaker.STATE_OPEN
 
     def test_to_dict_includes_state(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=3, cooldown_seconds=10)
         d = cb.to_dict()
         assert "state" in d
         assert d["state"] == CircuitBreaker.STATE_CLOSED
 
     def test_half_open_limits_attempts(self):
-        from models import CircuitBreaker
+        from task_router.models import CircuitBreaker
         cb = CircuitBreaker(max_failures=2, cooldown_seconds=0, half_open_max=1)
         cb.record_failure()
         cb.record_failure()
@@ -451,20 +451,20 @@ class TestDistillationTTL:
     """测试蒸馏数据 TTL 过期和清理"""
 
     def test_is_expired_recent_pair(self, tmp_path):
-        from distillation import DistillationStore, PAIR_HYPOTHESIS
+        from task_router.distillation import DistillationStore, PAIR_HYPOTHESIS
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=90)
         pair = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "epistemic_state": PAIR_HYPOTHESIS}
         assert store._is_expired(pair) is False
 
     def test_is_expired_old_pair(self, tmp_path):
-        from distillation import DistillationStore, PAIR_HYPOTHESIS
+        from task_router.distillation import DistillationStore, PAIR_HYPOTHESIS
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=30)
         old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 31 * 86400))
         pair = {"time": old_time, "epistemic_state": PAIR_HYPOTHESIS}
         assert store._is_expired(pair) is True
 
     def test_contested_expires_faster(self, tmp_path):
-        from distillation import DistillationStore, PAIR_CONTESTED
+        from task_router.distillation import DistillationStore, PAIR_CONTESTED
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=90)
         # 20 days old: still within 90-day TTL but past 14-day contested TTL
         old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 20 * 86400))
@@ -472,14 +472,14 @@ class TestDistillationTTL:
         assert store._is_expired(pair) is True
 
     def test_outdated_expires_fastest(self, tmp_path):
-        from distillation import DistillationStore, PAIR_OUTDATED
+        from task_router.distillation import DistillationStore, PAIR_OUTDATED
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=90)
         old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 10 * 86400))
         pair = {"time": old_time, "epistemic_state": PAIR_OUTDATED}
         assert store._is_expired(pair) is True
 
     def test_cleanup_expired_removes_old(self, tmp_path):
-        from distillation import DistillationStore, DistillationPair, PAIR_HYPOTHESIS
+        from task_router.distillation import DistillationStore, DistillationPair, PAIR_HYPOTHESIS
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=1)
         # Add a fresh pair
         pair1 = DistillationPair(prompt="test1", response="ok1")
@@ -495,7 +495,7 @@ class TestDistillationTTL:
         assert len(remaining) == 1
 
     def test_get_pairs_filters_expired(self, tmp_path):
-        from distillation import DistillationStore, DistillationPair, PAIR_SUPPORTED
+        from task_router.distillation import DistillationStore, DistillationPair, PAIR_SUPPORTED
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=1)
         pair = DistillationPair(prompt="new", response="ok")
         pair.epistemic_state = PAIR_SUPPORTED
@@ -509,7 +509,7 @@ class TestDistillationTTL:
         assert len(pairs) == 1
 
     def test_get_stats_includes_expired(self, tmp_path):
-        from distillation import DistillationStore, DistillationPair, PAIR_HYPOTHESIS
+        from task_router.distillation import DistillationStore, DistillationPair, PAIR_HYPOTHESIS
         store = DistillationStore(cache_dir=str(tmp_path), ttl_days=1)
         store.add_pair(DistillationPair(prompt="new", response="ok"))
         old_time = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 2 * 86400))
@@ -527,7 +527,7 @@ class TestCacheTTL:
     """测试缓存 TTL 过期行为"""
 
     def test_cache_entry_expires(self, tmp_path):
-        from cache import SemanticCache
+        from task_router.cache import SemanticCache
         c = SemanticCache(cache_dir=str(tmp_path))
         c.set("test action", "text", {"text": "result"}, ttl_hours=0)
         # ttl_hours=0 means expires immediately
@@ -536,7 +536,7 @@ class TestCacheTTL:
         assert cached is None
 
     def test_cache_entry_valid(self, tmp_path):
-        from cache import SemanticCache
+        from task_router.cache import SemanticCache
         c = SemanticCache(cache_dir=str(tmp_path))
         c.set("test action", "text", {"text": "result"}, ttl_hours=24)
         cached = c.get("test action", "text")
@@ -551,7 +551,7 @@ class TestCacheConcurrency:
     def test_concurrent_set_get(self, tmp_path):
         """多线程同时读写缓存不应崩溃"""
         import threading
-        from cache import SemanticCache
+        from task_router.cache import SemanticCache
         c = SemanticCache(cache_dir=str(tmp_path), max_entries=100)
         errors: list[Exception] = []
 
@@ -582,7 +582,7 @@ class TestCacheConcurrency:
     def test_concurrent_set_no_corruption(self, tmp_path):
         """并发写入后缓存文件可正常读取"""
         import threading
-        from cache import SemanticCache
+        from task_router.cache import SemanticCache
         c = SemanticCache(cache_dir=str(tmp_path), max_entries=50)
 
         def writer(tid: int):
@@ -697,7 +697,7 @@ class TestRunTaskIntegration:
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
         """每个测试前清空缓存，避免跨测试污染"""
-        from task_router import cache
+        from task_router.task_router import cache
         with cache._lock:
             cache._entries.clear()
         yield
@@ -706,7 +706,7 @@ class TestRunTaskIntegration:
 
     def test_rule_engine_sort_numbers(self):
         """排序任务走规则引擎"""
-        from task_router import run_task, Task
+        from task_router.task_router import run_task, Task
         task = Task(action="排序数字", text="5,3,8,1,9,2")
         result = run_task(task, force_route="local")
         assert result.output
@@ -714,7 +714,7 @@ class TestRunTaskIntegration:
 
     def test_rule_engine_dedup(self):
         """去重任务走规则引擎"""
-        from task_router import run_task, Task
+        from task_router.task_router import run_task, Task
         task = Task(action="去重", text="苹果,香蕉,苹果,橙子,香蕉")
         result = run_task(task, force_route="local")
         assert result.output
@@ -723,7 +723,7 @@ class TestRunTaskIntegration:
 
     def test_rule_engine_count(self):
         """计数任务走规则引擎"""
-        from task_router import run_task, Task
+        from task_router.task_router import run_task, Task
         task = Task(action="计数", text="苹果,香蕉,橙子")
         result = run_task(task, force_route="local")
         assert result.output
@@ -733,7 +733,7 @@ class TestRunTaskIntegration:
     def test_local_with_mock_ollama(self):
         """本地任务通过 mock ollama 执行"""
         from unittest.mock import patch
-        from task_router import run_task, Task
+        from task_router.task_router import run_task, Task
 
         mock_result = {
             "text": "这是mock输出",
@@ -741,7 +741,7 @@ class TestRunTaskIntegration:
             "tokens_output": 20,
             "time_ms": 100,
         }
-        with patch("task_router.call_ollama", return_value=mock_result):
+        with patch("task_router.task_router.call_ollama", return_value=mock_result):
             task = Task(action="翻译成中文", text="Hello world")
             result = run_task(task, force_route="local")
             assert result.output == "这是mock输出"
@@ -750,7 +750,7 @@ class TestRunTaskIntegration:
     def test_cache_hit_on_repeat(self):
         """重复任务命中缓存"""
         from unittest.mock import patch
-        from task_router import run_task, Task
+        from task_router.task_router import run_task, Task
 
         mock_result = {
             "text": "缓存测试输出",
@@ -758,7 +758,7 @@ class TestRunTaskIntegration:
             "tokens_output": 10,
             "time_ms": 50,
         }
-        with patch("task_router.call_ollama", return_value=mock_result):
+        with patch("task_router.task_router.call_ollama", return_value=mock_result):
             task1 = Task(action="缓存测试唯一任务XYZ", text="test content")
             result1 = run_task(task1, force_route="local")
             assert result1.model_used != "cache"
@@ -770,7 +770,7 @@ class TestRunTaskIntegration:
 
     def test_estimate_returns_valid(self):
         """estimate 返回完整结构"""
-        from task_router import estimate
+        from task_router.task_router import estimate
         result = estimate("翻译成英文")
         assert "task" in result
         assert "suggested_route" in result
@@ -779,7 +779,7 @@ class TestRunTaskIntegration:
 
     def test_classify_task_returns_type(self):
         """classify_task 返回任务类型"""
-        from task_router import classify_task
+        from task_router.task_router import classify_task
         result = classify_task("分类这些文本", "苹果\n香蕉\n橙子")
         assert "task_type" in result
         assert "verdict" in result
@@ -792,13 +792,13 @@ class TestStatsAndThresholds:
 
     def test_show_usage_stats_no_crash(self):
         """show_usage_stats 不应因缺少导入而崩溃"""
-        from task_router import show_usage_stats
+        from task_router.task_router import show_usage_stats
         result = show_usage_stats()
         assert isinstance(result, str)
 
     def test_capability_tracker_record_and_rate(self, tmp_path):
         """CapabilityTracker 记录和成功率计算"""
-        from task_router import CapabilityTracker
+        from task_router.task_router import CapabilityTracker
         tracker = CapabilityTracker(cache_dir=str(tmp_path))
         tracker.record("classification", success=True)
         tracker.record("classification", success=True)
@@ -808,7 +808,7 @@ class TestStatsAndThresholds:
 
     def test_capability_tracker_get_all_adjustments(self, tmp_path):
         """get_all_adjustments 使用 read_jsonl，不应崩溃"""
-        from task_router import CapabilityTracker
+        from task_router.task_router import CapabilityTracker
         tracker = CapabilityTracker(cache_dir=str(tmp_path))
         tracker.record("translation", success=True, task_type="translate_en2zh")
         result = tracker.get_all_adjustments()
@@ -822,7 +822,7 @@ class TestConfigLoading:
     """测试配置文件加载"""
 
     def test_from_json(self, tmp_path):
-        from config import RouterConfig
+        from task_router.config import RouterConfig
         config_file = tmp_path / "config.json"
         config_file.write_text('{"local_model": "test-model", "base_threshold": 5.0}')
         cfg = RouterConfig.from_json(str(config_file))
@@ -830,12 +830,12 @@ class TestConfigLoading:
         assert cfg.base_threshold == 5.0
 
     def test_from_json_missing_file(self, tmp_path):
-        from config import RouterConfig
+        from task_router.config import RouterConfig
         cfg = RouterConfig.from_json(str(tmp_path / "nonexistent.json"))
         assert cfg.local_model == "qwen-tool"  # default
 
     def test_from_json_invalid(self, tmp_path):
-        from config import RouterConfig
+        from task_router.config import RouterConfig
         config_file = tmp_path / "bad.json"
         config_file.write_text("not json")
         cfg = RouterConfig.from_json(str(config_file))
@@ -846,17 +846,17 @@ class TestAuthMiddleware:
     """API 认证中间件测试"""
 
     def test_safe_eq_matching(self):
-        from api_server import TaskRouterHandler
+        from task_router.api_server import TaskRouterHandler
         h = TaskRouterHandler()
         assert h._safe_eq("test-key-123", "test-key-123") is True
 
     def test_safe_eq_mismatch(self):
-        from api_server import TaskRouterHandler
+        from task_router.api_server import TaskRouterHandler
         h = TaskRouterHandler()
         assert h._safe_eq("test-key-123", "test-key-456") is False
 
     def test_safe_eq_empty(self):
-        from api_server import TaskRouterHandler
+        from task_router.api_server import TaskRouterHandler
         h = TaskRouterHandler()
         assert h._safe_eq("", "test") is False
         assert h._safe_eq("test", "") is False
@@ -865,7 +865,7 @@ class TestAuthMiddleware:
     def test_safe_eq_constant_time(self):
         """验证 hmac.compare_digest 被使用（不会因首字符不同而更快）"""
         import hmac
-        from api_server import TaskRouterHandler
+        from task_router.api_server import TaskRouterHandler
         h = TaskRouterHandler()
         # 确保底层调用的是 hmac.compare_digest
         a = "a" * 100
@@ -879,7 +879,7 @@ class TestAuthMiddleware:
 class TestRecursionDepthLimit:
     def test_run_task_respects_depth_limit(self):
         """run_task 在超过最大递归深度时返回错误"""
-        from task_router import run_task, CONFIG
+        from task_router.task_router import run_task, CONFIG
         task = Task(action="测试深度限制", text="test")
         result = run_task(task, _depth=CONFIG.max_recurse_depth + 1)
         assert result.route == "error"
@@ -887,7 +887,7 @@ class TestRecursionDepthLimit:
 
     def test_run_task_depth_zero_does_not_trigger(self):
         """depth=0 不触发递归限制"""
-        from task_router import run_task
+        from task_router.task_router import run_task
         task = Task(action="测试", text="")
         try:
             result = run_task(task, _depth=0)

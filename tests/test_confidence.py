@@ -13,7 +13,7 @@ import json
 import pytest
 import tempfile
 
-from confidence import (
+from task_router.confidence import (
     extract_confidence,
     extract_confidence_from_text,
     ConfidenceCalibrator,

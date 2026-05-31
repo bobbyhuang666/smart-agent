@@ -10,7 +10,7 @@
 import pytest
 import tempfile
 
-from distillation import (
+from task_router.distillation import (
     QualityEvaluator,
     FailureClusterer,
     ClosedLoopManager,

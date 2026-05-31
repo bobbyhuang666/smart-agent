@@ -2,7 +2,7 @@
 自适应 Prompt 压缩器测试
 """
 
-from adaptive_compression import (
+from task_router.adaptive_compression import (
     estimate_importance,
     compress_adaptive,
     get_token_savings,

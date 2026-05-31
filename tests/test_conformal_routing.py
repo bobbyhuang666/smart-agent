@@ -12,7 +12,7 @@ import math
 import pytest
 import tempfile
 
-from conformal_routing import (
+from task_router.conformal_routing import (
     AdaptiveConformalInference,
     SlidingWindowCalibrator,
     UncertaintyDecomposer,

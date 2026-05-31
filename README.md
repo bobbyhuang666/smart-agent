@@ -5,7 +5,7 @@
 
 简单任务 → 本地 Ollama（免费）| 复杂任务 → 云端 API（按需付费）
 
-535 个自动化测试 | 五层决策融合 | 在线学习 | 不确定性量化
+700 个自动化测试 | 五层决策融合 | Self-Reflective Routing | 在线学习 | 不确定性量化
 
 > **注意**：本项目目前的基准测试基于合成数据（模拟 logprobs + 手工场景），非真实生产环境数据。路由效果取决于实际任务分布和本地模型能力，建议在自己的场景上评估后再投入生产使用。
 
@@ -72,6 +72,27 @@
 
 ---
 
+## Self-Reflective Routing (SRR)
+
+TaskRouter v6.0 新增 **Self-Reflective Routing** 系统——路由决策后的自主反思与纠错闭环：
+
+| 模块 | 功能 | 说明 |
+|------|------|------|
+| **EpisodeCollector** | 路由轨迹收集 | 记录每次路由的完整决策链（特征→信号→结果） |
+| **QualityJudge** | LLM-as-Judge 质量评估 | 用云端 LLM 盲评输出质量，5 维度打分 |
+| **ReflectionEngine** | 反思引擎 | 分析失败模式，识别系统性偏差 |
+| **CorrectionApplier** | 纠错执行 | 将反思结论转化为路由策略调整 |
+
+```
+路由决策 → EpisodeCollector 记录 → QualityJudge 评估
+    ↑                                      ↓
+CorrectionApplier ← ReflectionEngine 反思
+```
+
+核心价值：系统不只是"做了决策"，还会"反思决策是否正确"并自主修正。
+
+---
+
 ## 设计决策
 
 以下是 TaskRouter 的关键设计选择及理由。这些不是遗漏或 Bug，而是有意为之：
@@ -105,22 +126,19 @@ API 端点限制单个输入字段最大 100K 字符、请求体最大 2MB。通
 ## 快速开始
 
 ```bash
-# 1. 安装
-pip3 install requests aiohttp
+# 1. 安装（推荐 editable 模式）
+pip install -e ".[dev]"
 ollama pull qwen-tool
 
-# 2. 设置别名
-alias sma="python3 /path/to/task-router/scripts/cli.py"
-
-# 3. 执行任务
+# 2. 执行任务
 sma --task "翻译成中文" --text "Hello World"
 # → 本地执行，免费，1-2秒
 
-# 4. 查看累计节约
+# 3. 查看累计节约
 sma --stats
 
-# 5. 启动 Web 仪表盘
-python3 scripts/api_server.py --port 8930
+# 4. 启动 Web 仪表盘
+python -m task_router.api_server --port 8930
 # 访问 http://localhost:8930
 ```
 
@@ -185,6 +203,8 @@ $ sma --estimate "分类这个产品属于哪个类别"
 
 ### 质量保障
 
+- **Self-Reflective Routing (SRR)**：路由后自主反思与纠错闭环（EpisodeCollector → QualityJudge → ReflectionEngine → CorrectionApplier）
+- **LLM-as-Judge**：用云端 LLM 盲评输出质量，5 维度打分（completeness/relevance/fluency/accuracy/format）
 - **QualityEvaluator 5 维评估**：结构/相关性/失败信号/任务适配/一致性
 - **输出验证 + 云端降级**：本地输出质量差时自动回退云端
 - **云端重试 + 熔断**：失败自动重试 2 次，连续 3 次失败触发 120 秒熔断
@@ -216,7 +236,7 @@ $ sma --estimate "分类这个产品属于哪个类别"
 ## API 服务
 
 ```bash
-python3 scripts/api_server.py --port 8930
+python -m task_router.api_server --port 8930
 ```
 
 | 方法 | 路径 | 说明 |
@@ -283,7 +303,7 @@ export CLOUD_MODEL="gpt-4o"
 
 ## 测试 & 质量
 
-- **535 个自动化测试**，覆盖 TQBC 路由、Conformal Routing、自适应压缩、缓存质量、推理策略、安全加固等
+- **700 个自动化测试**，覆盖 TQBC 路由、Conformal Routing、Self-Reflective Routing、自适应压缩、缓存质量、推理策略、安全加固等
 - **CI/CD**: GitHub Actions，Python 3.10-3.13 矩阵测试 + ruff 静态分析
 
 ```bash

@@ -10,7 +10,7 @@
 import pytest
 import tempfile
 
-from audit import ApiKeyConfig, ApiKeyManager, QuotaManager
+from task_router.audit import ApiKeyConfig, ApiKeyManager, QuotaManager
 
 
 # ─── ApiKeyConfig 测试 ──────────────────────────────────────────────

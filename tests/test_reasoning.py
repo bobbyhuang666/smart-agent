@@ -12,7 +12,7 @@ import json
 import pytest
 import tempfile
 
-from reasoning import (
+from task_router.reasoning import (
     select_reasoning_strategy,
     enhance_prompt_with_strategy,
     StrategyTracker,

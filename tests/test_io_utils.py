@@ -12,7 +12,7 @@ import tempfile
 
 import pytest
 
-from io_utils import append_jsonl, read_jsonl, write_jsonl
+from task_router.io_utils import append_jsonl, read_jsonl, write_jsonl
 
 
 @pytest.fixture

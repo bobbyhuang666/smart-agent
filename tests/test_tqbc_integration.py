@@ -5,9 +5,9 @@ TQBC 端到端集成测试 — 验证四层决策融合
 import pytest
 import tempfile
 
-from tqbc import TQBCRouter
-from meta_learner import MetaLearner, ActiveLearner, extract_routing_features
-from confidence import CascadeDecision
+from task_router.tqbc import TQBCRouter
+from task_router.meta_learner import MetaLearner, ActiveLearner, extract_routing_features
+from task_router.confidence import CascadeDecision
 
 
 def _make_logprobs(n: int, confident: bool = True) -> list[dict]:

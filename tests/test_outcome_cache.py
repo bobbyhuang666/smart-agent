@@ -11,7 +11,7 @@
 import pytest
 import tempfile
 
-from outcome_cache import OutcomeAwareCache, get_outcome_cache
+from task_router.outcome_cache import OutcomeAwareCache, get_outcome_cache
 
 
 class TestOutcomeAwareCache:
@@ -266,15 +266,15 @@ class TestGlobalInstance:
         """get_outcome_cache 应返回单例"""
         with tempfile.TemporaryDirectory() as d:
             # 清理全局实例
-            import outcome_cache
-            outcome_cache._quality_cache = None
+            import task_router.outcome_cache as _oc
+            _oc._quality_cache = None
 
             c1 = get_outcome_cache(d)
             c2 = get_outcome_cache(d)
             assert c1 is c2
 
             # 清理
-            outcome_cache._quality_cache = None
+            _oc._quality_cache = None
 
 
 class TestOATSPattern:
