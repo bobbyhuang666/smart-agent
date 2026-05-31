@@ -19,7 +19,6 @@ import math
 import os
 import random
 import sys
-import tempfile
 import time
 
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
@@ -121,13 +120,11 @@ def simulate_route(task: EvalTask, config, rng: random.Random) -> dict:
     """
     gt = task.ground_truth_route
     diff = task.difficulty
-    complexity = _complexity_for_task(task)
 
     # 随机基线
     if config.name == "Random":
         predicted = "local" if rng.random() < 0.5 else "cloud"
         conf = 0.5
-        in_set = gt in ("local", "cloud", "either")
         prediction_set = ["local", "cloud"]
     # 启发式基线
     elif config.name == "Heuristic":
@@ -145,9 +142,6 @@ def simulate_route(task: EvalTask, config, rng: random.Random) -> dict:
         prediction_set = _heuristic_prediction_set(task, 0.9)
     else:
         # TQBC 变体
-        logprobs_fn = LOGPROBS_MAP.get(diff, make_medium_logprobs)
-        logprobs = logprobs_fn()
-
         # 基础置信度（从 logprobs 推导）
         if diff == "easy":
             raw_conf = 0.7 + rng.random() * 0.25

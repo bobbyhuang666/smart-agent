@@ -2,7 +2,6 @@
 文本预处理与后处理 — 纯函数，零依赖
 """
 
-import re
 
 
 def preprocess_text(text: str, max_chars: int = 800) -> str:

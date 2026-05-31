@@ -19,7 +19,6 @@ import os
 import random
 import sys
 import time
-from dataclasses import dataclass, field
 
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
 if SCRIPTS_DIR not in sys.path:
@@ -27,9 +26,7 @@ if SCRIPTS_DIR not in sys.path:
 
 # 复用 benchmark_routing.py 的任务定义和评估逻辑
 from task_router.benchmark_routing import (
-    TASK_SUITE, EvalTask, EvalResult, BenchmarkResult,
-    evaluate_routing, _heuristic_route, _random_route,
-    print_report, save_json,
+    TASK_SUITE, evaluate_routing, _heuristic_route,
 )
 
 

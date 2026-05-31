@@ -13,8 +13,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from task_router.io_utils import read_jsonl, append_jsonl, write_jsonl
 
@@ -94,7 +93,6 @@ class CorrectionApplier:
             c = correction.to_dict() if hasattr(correction, "to_dict") else correction
             cid = c.get("correction_id", "")
             confidence = c.get("confidence", 0.0)
-            target = c.get("target", "")
             reason = c.get("reason", "")
 
             # 置信度过滤

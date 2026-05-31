@@ -11,7 +11,7 @@ TaskRouter — 企业 LLM 网关
 - 本文件: 核心编排逻辑
 """
 
-import os
+import os  # noqa: F401 — re-exported for downstream modules
 import time
 import logging
 import threading
@@ -28,7 +28,7 @@ from task_router.routing import (
     decompose_complex_task, _recursive_decompose,
 )
 from task_router.cache import SemanticCache
-from task_router.models import call_ollama, call_cloud_api, circuit_breaker
+from task_router.models import call_ollama, call_cloud_api, circuit_breaker  # noqa: F401
 from task_router.prompts import (
     PROMPT_TEMPLATES, build_optimized_prompt, get_max_tokens,
 )
@@ -38,7 +38,6 @@ from task_router.distillation import (
     DistillationStore, collect_distillation_pair,
     get_dynamic_examples,
 )
-from task_router.io_utils import read_jsonl, append_jsonl
 from task_router.reasoning import (
     select_strategy, enhance_prompt_with_strategy,
     STRATEGY_TOKEN_MULTIPLIER, TOKEN_BUDGET, get_strategy_tracker,
@@ -51,12 +50,15 @@ from task_router.outcome_cache import OutcomeAwareCache
 from task_router.conformal_routing import ConformalizedRouter
 
 # 从拆分模块导入（保持向后兼容的导入路径）
+from task_router.io_utils import read_jsonl, append_jsonl  # noqa: F401
 from task_router.preprocessing import preprocess_text, postprocess_output
-from task_router.cost import (
+from task_router.cost import (  # noqa: F401
     calc_cost, calc_savings, log_usage, _scrub_pii,
     _classify_route, show_usage_stats, CapabilityTracker,
 )
-from task_router.task_planner import (
+
+# Re-export task_planner API (used by tests and CLI)
+from task_router.task_planner import (  # noqa: F401
     estimate, classify_task, decompose_task, execute_plan,
     DECOMPOSE_TEMPLATES,
 )

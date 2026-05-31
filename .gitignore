@@ -1,2 +1,7 @@
 *.pyc
 __pycache__/
+results/
+tqbc_thompson.json
+*.egg-info/
+dist/
+build/

@@ -22,7 +22,6 @@ if SCRIPTS_DIR not in sys.path:
 
 from task_router.tqbc import (
     TQBCRouter, extract_quantile_features,
-    TokenQuantileFeatures, quantiles_to_feature_vector,
     ThompsonSamplingRouter, BayesianConfidenceCalibrator,
 )
 

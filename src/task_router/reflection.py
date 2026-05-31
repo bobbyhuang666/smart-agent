@@ -20,13 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from task_router.io_utils import read_jsonl, append_jsonl
-from task_router.episode_collector import EpisodeCollector, get_episode_collector
+from task_router.episode_collector import EpisodeCollector
 from task_router.quality_judge import (
     QualityJudge,
-    QualityScores,
-    get_quality_judge,
-    STRATEGY_OPTIONS,
-    ROUTE_OPTIONS,
 )
 
 log = logging.getLogger(__name__)
@@ -248,7 +244,6 @@ class StrategyReflector:
             used_strategy = ep.get("strategy", "direct")
             optimal_strategy = ep.get("optimal_strategy", "")
             task_type = ep.get("task_type", "unknown")
-            error = ep.get("routing_error", "none")
 
             if not optimal_strategy or optimal_strategy == used_strategy:
                 continue

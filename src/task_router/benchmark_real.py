@@ -634,6 +634,16 @@ def run_real_benchmark():
     print(f"\n结果已保存到 {output_path}")
 
 
+def _simulate_cloud(task: dict) -> dict:
+    """模拟云端 API 响应（无 API key 时使用）"""
+    action = task.get("action", "")
+    text = task.get("text", "")
+    prompt = f"{action}\n{text}" if text else action
+    # 简单模拟：基于任务复杂度返回合理长度的模拟输出
+    simulated = f"[模拟云端输出] 对以下任务的响应：{prompt[:100]}..."
+    return {"output": simulated, "latency_ms": 0.0, "route": "cloud"}
+
+
 def _call_cloud_api(task: dict, api_url: str, api_key: str) -> dict:
     """调用真实 DeepSeek 云端 API"""
     try:
