@@ -24,12 +24,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov requests aiohttp
+          pip install pytest pytest-cov requests aiohttp pyyaml
 
       - name: Run tests with coverage
         run: |
           python -m pytest tests/ -v --tb=short \
-            --cov=scripts --cov-report=term-missing --cov-report=xml \
+            --cov=src/task_router --cov-report=term-missing --cov-report=xml \
             --cov-fail-under=40
 
       - name: Upload coverage
@@ -53,10 +53,10 @@ jobs:
         run: pip install ruff
 
       - name: Ruff check
-        run: ruff check scripts/ --select E,F,W --ignore E501,E402,F541
+        run: ruff check src/task_router/ --select E,F,W --ignore E501,E402,F541
 
       - name: Ruff format check
-        run: ruff format scripts/ --check --diff || true
+        run: ruff format src/task_router/ --check --diff || true
 
       - name: Syntax check
-        run: python -m py_compile scripts/task_router.py
+        run: python -m py_compile src/task_router/task_router.py
